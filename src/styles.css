@@ -32,21 +32,98 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 布局：左侧导航栏 + 右侧内容区（分栏式） */
 .app {
   display: flex;
-  flex-direction: column;
   height: 100%;
 }
 
-/* 顶栏 */
-.topbar {
+/* 侧边导航栏 */
+.sidebar {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 12px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+.brand {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 14px 20px;
-  background: var(--panel);
+  gap: 10px;
+  padding: 0 6px;
+}
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 13.5px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.nav-item:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.nav-item.active {
+  background: #eaefff;
+  color: var(--primary-d);
+  font-weight: 600;
+}
+.nav-icon {
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+}
+/* 接管生效中的小圆点提示 */
+.nav-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.sidebar-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+/* 右侧主区 */
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 页头：标题 + 页面级操作 */
+.pagebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 22px;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
+.pagebar h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -73,15 +150,6 @@ body {
   color: var(--muted);
 }
 
-/* 工具条 */
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 20px;
-  background: var(--panel-2);
-  border-bottom: 1px solid var(--border);
-}
 .spacer {
   flex: 1;
 }
@@ -135,7 +203,20 @@ body {
 .content {
   flex: 1;
   overflow: auto;
-  padding: 18px 20px;
+  padding: 18px 22px;
+}
+/* 页面内容统一限宽，避免宽屏下拉伸过散 */
+.panel-page {
+  max-width: 760px;
+}
+/* 页面底部操作区（保存等） */
+.page-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 .empty {
   color: var(--muted);
@@ -161,7 +242,13 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 14px 16px;
-  box-shadow: var(--shadow);
+}
+/* 列表尾部「再收一个账号」的引导行 */
+.ac-more {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  padding: 4px 0 10px;
 }
 .ac-main {
   min-width: 0;
@@ -285,13 +372,15 @@ body {
   margin: 0 0 14px;
   font-size: 17px;
 }
-.modal label {
+.modal label,
+.panel-page label {
   display: block;
   font-size: 13px;
   color: var(--muted);
   margin-bottom: 12px;
 }
-.modal label.checkbox {
+.modal label.checkbox,
+.panel-page label.checkbox {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -299,7 +388,8 @@ body {
 }
 /* 复选框不受 `.modal input { width:100% }` 影响，否则会被拉成一整行宽、
    勾选标记跑到中间（表现为「复选框居中 + 文字靠右」的错版） */
-.modal label.checkbox input[type="checkbox"] {
+.modal label.checkbox input[type="checkbox"],
+.panel-page label.checkbox input[type="checkbox"] {
   width: 15px;
   height: 15px;
   flex: 0 0 auto;
@@ -310,7 +400,9 @@ body {
 }
 .modal input,
 .modal textarea,
-.modal select {
+.modal select,
+.panel-page input,
+.panel-page select {
   width: 100%;
   margin-top: 6px;
   padding: 9px 11px;
@@ -322,12 +414,15 @@ body {
   background: #fbfcfe;
   resize: vertical;
 }
-.modal select {
+.modal select,
+.panel-page select {
   cursor: pointer;
 }
 .modal input:focus,
 .modal textarea:focus,
-.modal select:focus {
+.modal select:focus,
+.panel-page input:focus,
+.panel-page select:focus {
   outline: none;
   border-color: var(--primary);
 }
@@ -380,7 +475,8 @@ body {
   margin: 0;
 }
 /* 设置弹窗里的小节标题 */
-.modal h3.sec {
+.modal h3.sec,
+.panel-page h3.sec {
   margin: 16px 0 4px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
@@ -809,4 +905,41 @@ body {
   color: #9aa3b5;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow-wrap: anywhere;
+}
+
+/* 签到日志页：筛选工具条 + 整页列表 */
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.logs-toolbar .filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0;
+}
+.logs-toolbar .filter select {
+  width: auto;
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--panel);
+  cursor: pointer;
+}
+/* 整页日志列表：跟随内容增长，由 .content 统一滚动 */
+.log-list.page-list {
+  max-height: none;
+  overflow: visible;
+}
+.log-list .log-name {
+  font-weight: 600;
+  font-size: 13px;
 }

@@ -82,6 +82,12 @@ pub struct Settings {
     /// None = 自动（粘滞 + 最旧积分优先）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_account_id: Option<String>,
+    /// 多账号风控预防：批量签到时在账号之间加入随机间隔，避免同一 IP 瞬时连发多账号请求。
+    #[serde(default = "default_true")]
+    pub stagger_checkin: bool,
+    /// 随机间隔上限（秒）；实际间隔在 2..=max 之间取值
+    #[serde(default = "default_stagger_max")]
+    pub stagger_max_seconds: u32,
 }
 
 impl Default for Settings {
@@ -98,8 +104,15 @@ impl Default for Settings {
             proxy_enabled: false,
             proxy_port: default_proxy_port(),
             preferred_account_id: None,
+            stagger_checkin: true,
+            stagger_max_seconds: default_stagger_max(),
         }
     }
+}
+
+/// 风控随机间隔默认上限：45 秒足够打散节奏，又不至于让「全部签到」等太久
+fn default_stagger_max() -> u32 {
+    45
 }
 
 /// 规范化时刻字符串：接受 `9:7` / `09:07` / 首尾空格，统一输出 `HH:MM`。

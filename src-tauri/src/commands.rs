@@ -341,6 +341,13 @@ pub(crate) async fn checkin_all_inner(app: &AppHandle) -> Result<Vec<Account>, S
     }
     let settings = accounts::load_settings(&dir);
     for i in 0..accounts.len() {
+        // 风控预防：从第二个账号起随机歇几秒再签，避免同一 IP 瞬时连发多账号请求
+        if i > 0 {
+            if let Some(secs) = stagger_seconds(settings.stagger_checkin, settings.stagger_max_seconds)
+            {
+                tokio::time::sleep(std::time::Duration::from_secs(secs as u64)).await;
+            }
+        }
         let _ = ensure_fresh_token(&mut accounts[i]).await;
         let rec = checkin::do_checkin(&accounts[i], &settings.default_base_url).await;
         accounts[i].last = Some(rec.clone());
@@ -510,6 +517,8 @@ fn normalize_settings(mut settings: Settings) -> Result<Settings, String> {
     settings.schedule_time = accounts::normalize_time(&settings.schedule_time)
         .ok_or_else(|| "定时签到时刻格式应为 HH:MM（例如 09:07）".to_string())?;
     settings.notify_webhook = settings.notify_webhook.trim().to_string();
+    // 风控间隔上限：钳制到合理区间，防手滑填 0（退化成无间隔）或填超大值
+    settings.stagger_max_seconds = settings.stagger_max_seconds.clamp(2, 600);
     // 优先扣费账号：空串统一归一成 None（= 自动），选号逻辑只认 None / 有效 id
     settings.preferred_account_id = settings
         .preferred_account_id
@@ -694,6 +703,22 @@ pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// 批量签到的风控间隔：返回某账号签到前应等待的秒数。
+///
+/// 未开启、或上限 < 2 时返回 None（不等待）。否则在 2..=max（秒）内取值——
+/// 用纳秒级时钟做轻量打散即可，这里不需要密码学强度，只要别让多账号
+/// 请求以固定节奏连发。
+fn stagger_seconds(enabled: bool, max: u32) -> Option<u32> {
+    if !enabled || max < 2 {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs().wrapping_mul(2654435761))
+        .unwrap_or(0);
+    Some(2 + (nanos % (max as u64 - 1)) as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +740,16 @@ mod tests {
         assert!(!re.is_match(
             "/Applications/WorkBuddy.app/Contents/MacOS/Electron --type=renderer"
         ));
+    }
+
+    #[test]
+    fn stagger_seconds_bounds_and_disabled() {
+        assert_eq!(stagger_seconds(false, 45), None);
+        assert_eq!(stagger_seconds(true, 0), None);
+        assert_eq!(stagger_seconds(true, 2), Some(2));
+        for _ in 0..50 {
+            let s = stagger_seconds(true, 45).unwrap();
+            assert!((2..=45).contains(&s), "间隔越界：{s}");
+        }
     }
 }

@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+# tauri-action 要用 GITHUB_TOKEN 创建 Release / 上传产物，默认 token 是只读的
+permissions:
+  contents: write
+
 jobs:
   release:
     strategy:
