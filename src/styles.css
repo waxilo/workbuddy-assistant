@@ -1,0 +1,812 @@
+:root {
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --panel-2: #eef2f8;
+  --text: #1f2533;
+  --muted: #6b7385;
+  --border: #e2e7f0;
+  --primary: #3b6cff;
+  --primary-d: #2f57d6;
+  --ok: #1f9d55;
+  --err: #d8453b;
+  --warn: #c9821a;
+  --shadow: 0 6px 20px rgba(31, 37, 51, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* 顶栏 */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.logo {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--primary);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 700;
+}
+.brand h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 工具条 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.spacer {
+  flex: 1;
+}
+.count {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* 按钮 */
+.btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn:hover {
+  border-color: #c9d2e3;
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+.btn.primary:hover {
+  background: var(--primary-d);
+}
+.btn.ghost {
+  background: transparent;
+}
+.btn.danger {
+  color: var(--err);
+  border-color: #f0c4c0;
+}
+.btn.danger:hover {
+  background: #fdecea;
+}
+.btn.small {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+/* 内容区 */
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 18px 20px;
+}
+.empty {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.7;
+  text-align: center;
+  margin-top: 60px;
+}
+
+.account-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.account-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: var(--shadow);
+}
+.ac-main {
+  min-width: 0;
+}
+.ac-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ac-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+/* 手机号：账号主标识之一，做成明显的胶囊 */
+.ac-phone {
+  font-size: 12px;
+  font-weight: 600;
+  color: #0f766e;
+  background: #e6fbf7;
+  border: 1px solid #bdeee5;
+  padding: 2px 9px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+}
+.ac-meta {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ac-meta code {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+/* token 降级为次要信息：更浅、更小 */
+.ac-meta code.tok {
+  font-size: 11px;
+  color: #9aa3b5;
+  background: #f2f4f9;
+}
+.tag {
+  font-size: 11px;
+  color: var(--primary-d);
+  background: #eaefff;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.ac-result {
+  margin-top: 8px;
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ac-result .msg {
+  color: var(--text);
+}
+/* 积分余额：需要在条目上突出显示 */
+.ac-result .ac-balance {
+  color: #b45309;
+  font-weight: 600;
+}
+.ac-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 徽标 */
+.badge {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.badge-ok {
+  background: #e3f6ea;
+  color: var(--ok);
+}
+.badge-already {
+  background: #eaf0ff;
+  color: var(--primary-d);
+}
+.badge-idle {
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.badge-err {
+  background: #fdecea;
+  color: var(--err);
+}
+
+/* 弹窗 */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 26, 38, 0.4);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+}
+.modal {
+  width: 460px;
+  max-width: 92vw;
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--panel);
+  border-radius: 14px;
+  padding: 22px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
+}
+.modal.wide {
+  width: 640px;
+}
+.modal h2 {
+  margin: 0 0 14px;
+  font-size: 17px;
+}
+.modal label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.modal label.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+/* 复选框不受 `.modal input { width:100% }` 影响，否则会被拉成一整行宽、
+   勾选标记跑到中间（表现为「复选框居中 + 文字靠右」的错版） */
+.modal label.checkbox input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.modal input,
+.modal textarea,
+.modal select {
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: #fbfcfe;
+  resize: vertical;
+}
+.modal select {
+  cursor: pointer;
+}
+.modal input:focus,
+.modal textarea:focus,
+.modal select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+.hint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin: -4px 0 12px;
+}
+.form-err {
+  color: var(--err);
+  font-size: 13px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+  /* 弹窗内容超高时（如设置面板）容器自身滚动；让操作按钮常驻底部，
+     否则「保存」会被滚出视野，用户以为没地方点 */
+  position: sticky;
+  bottom: -22px; /* 抵消 .modal 的 22px 内边距，贴在滚动容器底边 */
+  z-index: 1;
+  padding: 12px 0 6px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+/* 表单里的纵向字段组（登录新账号 / 设置面板共用） */
+.opt-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.opt-col label:not(.checkbox) {
+  max-width: 160px;
+}
+.opt-col label.wide {
+  max-width: none;
+}
+/* 行内按钮 + 说明文字 */
+.opt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 4px;
+  flex-wrap: wrap;
+}
+.hint.inline {
+  margin: 0;
+}
+/* 设置弹窗里的小节标题 */
+.modal h3.sec {
+  margin: 16px 0 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text);
+}
+.oauth-wait {
+  margin: 6px 0;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.oauth-uri {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 4px;
+}
+.oauth-uri code {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border-radius: 8px;
+  padding: 6px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 「登录新账号」拿到的结果卡片 */
+.result-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.result-card > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.result-card code {
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* 自研确认框（替代 window.confirm） */
+.confirm-mask {
+  z-index: 80;
+}
+.modal.confirm {
+  width: 380px;
+}
+.confirm-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+/* 网络急救：诊断结果与恢复轨迹 */
+.net-ok {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--ok);
+}
+.net-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  max-height: 30vh;
+  overflow: auto;
+}
+/* 左侧色条区分严重度：红=会断网，橙=残留 */
+.net-item {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+.net-item.block {
+  border-left-color: var(--err);
+  background: #fffafa;
+}
+.net-item.warn {
+  border-left-color: var(--warn);
+}
+.net-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.net-scope {
+  font-size: 13px;
+  font-weight: 600;
+}
+.net-target {
+  font-size: 11px;
+  color: #9aa3b5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+.net-value {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.net-note {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.net-steps {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.net-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.net-step .mark {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+.net-step.ok .mark {
+  color: var(--ok);
+}
+.net-step.bad .mark {
+  color: var(--err);
+}
+.net-backups {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* 文本按钮（备份文件用它在 Finder 里定位） */
+.link-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--primary-d);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.link-btn:hover {
+  color: var(--primary);
+}
+
+/* 「正常」一级：本应用自己的无感接管在跑，不该被当成问题看 */
+.net-item.ok {
+  border-left-color: var(--ok);
+  background: var(--panel-2);
+}
+
+/* 危险操作前的醒目说明（无感接管会改 WorkBuddy 的全局端点） */
+.hint.danger-hint {
+  border-left: 3px solid var(--warn);
+  background: var(--panel-2);
+  border-radius: 0 8px 8px 0;
+  padding: 8px 12px;
+  color: var(--text);
+}
+
+/* 无感接管的状态行 */
+.stealth-state {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.stealth-state .dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  align-self: center;
+}
+.stealth-state.ok {
+  color: var(--ok);
+}
+.stealth-state.ok .dot {
+  background: var(--ok);
+}
+.stealth-state.bad {
+  color: var(--err);
+}
+.stealth-state.bad .dot {
+  background: var(--err);
+}
+.stealth-state.idle {
+  color: var(--warn);
+}
+.stealth-state.idle .dot {
+  background: var(--warn);
+}
+.stealth-state .stealth-note {
+  flex: 1 1 100%;
+  font-weight: 400;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+/* 最近路由：一眼看出「现在实际在用哪个账号」 */
+.routes {
+  margin: 8px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.routes-head {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.routes ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 22vh;
+  overflow: auto;
+}
+.routes li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.routes li:last-child {
+  border-bottom: none;
+}
+.routes .r-at {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.routes .r-acct {
+  flex: 0 1 auto;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 30%;
+}
+.routes .r-path {
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.routes .r-path em {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--primary-d);
+  background: var(--panel-2);
+}
+.routes .r-conv {
+  flex: 0 0 auto;
+  color: #9aa3b5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 更新条 / toast */
+.update-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  background: var(--text);
+  color: #fff;
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  z-index: 60;
+}
+.update-bar .prog {
+  color: #9fd0ff;
+}
+.toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: #fff;
+  z-index: 70;
+  box-shadow: var(--shadow);
+}
+.toast-ok {
+  background: var(--ok);
+}
+.toast-err {
+  background: var(--err);
+}
+.toast-info {
+  background: var(--primary);
+}
+
+/* 签到日志：固定 3.5 条高度，条目高度保持自然（多余空间留白，不拉伸条目），滚动条隐藏 */
+.log-list {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start; /* 默认 stretch 会把行撑高去填满容器——条目必须保持原高度 */
+  overflow: auto;
+  scrollbar-width: none; /* Firefox */
+}
+.log-list::-webkit-scrollbar {
+  display: none; /* WebKit / Tauri WebView */
+}
+.log-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.log-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.log-time {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+.log-meta {
+  margin-top: 6px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+.log-msg {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* 本机登录文件列表（导入本机账号） */
+.local-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.local-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.local-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.local-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.local-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.local-uid {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #9aa3b5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}

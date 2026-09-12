@@ -1,0 +1,1079 @@
+//! 本地反代（默认 `127.0.0.1:8787`）：**WorkBuddy 专用**的无感接管通道。
+//!
+//! 开关只有一个：开启 = 监听本机端口 + 把 WorkBuddy 的端点指向这里；
+//! 关闭 = 停止监听 + 摘掉端点。装卸与安全由 `stealth` 模块负责。
+//!
+//! 因为只服务本机的 WorkBuddy（监听 `127.0.0.1`，来源只可能是本机进程），
+//! **没有鉴权 Key**——被接管的 WorkBuddy 也不会带任何额外请求头。
+//!
+//! 路由逻辑：
+//!
+//! 1. **会话粘滞**：带 `x-conversation-id` 的请求复用上次选中的账号 —— 一次对话中途
+//!    换账号会丢上下文，必须粘住。新会话（粘滞过期或首次）才重新选。
+//! 2. **选账号**：谁的「还有余量的资源包」最早过期就用谁——把快过期的积分先消耗掉；
+//!    查不到过期时间的账号排最后，剩余积分为 0 的账号直接跳过（除非全员为 0）。
+//! 3. **续签兜底**：选中的账号若凭证临近过期（<48h）会先自动续签。
+//! 4. **转发**：路径与查询串原样保留，替换 `Authorization` 为选中账号的 token，
+//!    去掉逐跳头（Host / Content-Length 等）后透传其余请求头。
+//!
+//! **响应一律用 chunked 流式下发。** 对话是 SSE（`text/event-stream`），实测若缓冲成
+//! 一次性 body，CLI 会报 `Empty stream` 并拿不到任何输出。
+//!
+//! 实现：`std::net::TcpListener` 手写 HTTP/1.1 解析（本机自用足够），
+//! 上游请求用现有 async reqwest + `block_on`。监督线程每 150ms 轮询一次设置，
+//! 关闭开关或改端口即自动解绑/重绑，无需重启应用。
+
+use crate::accounts;
+use crate::checkin::fetch_credit_snapshot;
+use crate::commands;
+use crate::stealth;
+use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// WorkBuddy 对话请求带的会话标识，用作粘滞键
+pub const CONV_HEADER: &str = "X-Conversation-Id";
+/// 积分快照缓存时长：路由决策不必每次都打资源接口
+const SNAPSHOT_TTL: Duration = Duration::from_secs(600);
+/// 同一会话多久没新请求就释放粘滞（换回按积分重新选）
+const STICKY_TTL: Duration = Duration::from_secs(30 * 60);
+/// accept 空轮询间隔（非阻塞监听）
+const ACCEPT_POLL: Duration = Duration::from_millis(150);
+/// 上游连接超时（建连阶段）
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 上游单次读空闲超时：SSE 长对话会持续数分钟，**不能用总超时**——
+/// reqwest 的 `timeout()` 覆盖整个响应体读取，会掐断活着的流；
+/// `read_timeout()` 只管「多久没收到新数据」，才是流的正确保护方式
+const UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 请求头 / 请求体上限
+const MAX_HEAD: usize = 64 * 1024;
+const MAX_BODY: usize = 16 * 1024 * 1024;
+/// 保留给界面展示的最近路由条数
+const ROUTE_LOG_MAX: usize = 50;
+
+static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+        .read_timeout(UPSTREAM_IDLE_TIMEOUT)
+        // 跟随重定向会把「路由拼错」的 302 变成一页 HTML（CLI 端只见空流，无从诊断）。
+        // 不跟：错误的 302 原样回到 CLI 和路由日志，一眼可见。
+        .redirect(reqwest::redirect::Policy::none())
+        // 官方域直连可达；若继承 shell 的 HTTP_PROXY 会把上游请求发去无关代理
+        .no_proxy()
+        .user_agent(concat!("WorkBuddyAssistant/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("构建 HTTP 客户端失败")
+});
+
+static PROXY_REQUEST_RECORDED: AtomicBool = AtomicBool::new(false);
+
+/// 一个账号的积分画像（缓存值）
+#[derive(Clone, Copy, Default, Debug)]
+struct CreditInfo {
+    /// 还有余量的资源包里最早的重置时间（毫秒）；未知为 None
+    expiry_ms: Option<i64>,
+    /// 剩余积分；未知为 None
+    credits: Option<f64>,
+}
+
+/// 单个账号的积分快照缓存
+fn cache() -> &'static Mutex<HashMap<String, (Instant, CreditInfo)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, CreditInfo)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 上次真正拉取积分快照的时刻（决定新会话要不要重新拉）
+fn last_snapshot() -> &'static Mutex<Option<Instant>> {
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+/// 会话粘滞：`x-conversation-id` → (最后命中时刻, 账号 id)
+fn sticky() -> &'static Mutex<HashMap<String, (Instant, String)>> {
+    static STICKY: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
+    STICKY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 最近若干次路由，给界面看「现在到底在用哪个账号」
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RouteLog {
+    pub at: String,
+    pub account: String,
+    pub path: String,
+    /// 会话 id 前 8 位；无则为空串
+    pub conv: String,
+    pub status: u16,
+    /// 是否为 SSE 流式响应
+    pub stream: bool,
+}
+
+fn route_log() -> &'static Mutex<VecDeque<RouteLog>> {
+    static LOG: OnceLock<Mutex<VecDeque<RouteLog>>> = OnceLock::new();
+    LOG.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// 取最近路由（新在前）。供 Tauri 命令读取。
+pub fn recent_routes() -> Vec<RouteLog> {
+    route_log()
+        .lock()
+        .map(|l| l.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+fn push_route(log: RouteLog) {
+    if let Ok(mut l) = route_log().lock() {
+        l.push_front(log);
+        while l.len() > ROUTE_LOG_MAX {
+            l.pop_back();
+        }
+    }
+}
+
+/// 路由排序键：最早过期者优先 → 查不到过期时间的靠后 → 剩余积分多者略优先。
+fn score(info: CreditInfo) -> (i64, i64) {
+    (
+        info.expiry_ms.unwrap_or(i64::MAX),
+        -(info.credits.unwrap_or(0.0) * 100.0) as i64,
+    )
+}
+
+/// 从候选里选出该用的账号下标。`infos` 与 `ids` 一一对应。
+fn pick_index(ids: &[String], infos: &[CreditInfo]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_score: Option<(i64, i64)> = None;
+    for (i, info) in infos.iter().enumerate() {
+        // 剩余积分为 0 的账号直接跳过（除非全员为 0 / 全未知）
+        if info.credits == Some(0.0) {
+            continue;
+        }
+        let s = score(*info);
+        if best_score.map_or(true, |cur| s < cur) {
+            best_score = Some(s);
+            best = Some(i);
+        }
+    }
+    // 全员为 0 时退化为取第一个（让上游自己报错，比代理直接 503 更有信息量）
+    best.or(if ids.is_empty() { None } else { Some(0) })
+}
+
+/// 监督线程：按设置启停 / 换端口重绑，并负责接管端点的装卸与心跳。
+///
+/// 必须先成功监听，再安装端点。否则端口被占时会把 WorkBuddy 指向无人监听的地址。
+pub fn spawn(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        if let (Ok(dir), Some(home)) = (commands::try_data_dir(&app), dirs::home_dir()) {
+            stealth::sweep(&home, &dir);
+        }
+
+        let mut installed_port: Option<u16> = None;
+        let mut disabled_cleaned = false;
+        loop {
+            let Ok(dir) = commands::try_data_dir(&app) else {
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            };
+            let settings = accounts::load_settings(&dir);
+            if !settings.proxy_enabled {
+                if !disabled_cleaned || installed_port.take().is_some() {
+                    if let Some(home) = dirs::home_dir() {
+                        if let Err(e) = stealth::uninstall(&home, &dir) {
+                            eprintln!("[proxy] 摘除接管端点失败：{e}");
+                        }
+                    }
+                    disabled_cleaned = true;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+
+            disabled_cleaned = false;
+            let port = settings.proxy_port;
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => {
+                    let Some(home) = dirs::home_dir() else {
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    };
+                    if let Err(e) = stealth::install(&home, &dir, port) {
+                        eprintln!("[proxy] 安装接管端点失败：{e}");
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                    installed_port = Some(port);
+                    let _ = listener.set_nonblocking(true);
+                    let mut last_beat = Instant::now();
+                    loop {
+                        let current = accounts::load_settings(&dir);
+                        if !current.proxy_enabled || current.proxy_port != port {
+                            break;
+                        }
+                        if last_beat.elapsed() >= stealth::HEARTBEAT_INTERVAL {
+                            stealth::heartbeat(&dir, port);
+                            last_beat = Instant::now();
+                        }
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                let app2 = app.clone();
+                                std::thread::spawn(move || handle_conn(stream, app2));
+                            }
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(ACCEPT_POLL);
+                            }
+                            Err(_) => std::thread::sleep(ACCEPT_POLL),
+                        }
+                    }
+                }
+                Err(e) => {
+                    if installed_port.take().is_some() {
+                        if let Some(home) = dirs::home_dir() {
+                            let _ = stealth::uninstall(&home, &dir);
+                        }
+                    }
+                    eprintln!("[proxy] 无法监听 127.0.0.1:{port}：{e}");
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// HTTP 解析（纯函数，便于单测）
+// ---------------------------------------------------------------------------
+
+/// 解析出的请求头部分
+#[derive(Debug, PartialEq)]
+struct Request {
+    method: String,
+    /// 含查询串的路径，如 `/v2/xxx?a=1`
+    target: String,
+    /// 全部请求头（名字保留原样，值 trim 过）
+    headers: Vec<(String, String)>,
+    /// 正文字节数（按 Content-Length）
+    body_len: usize,
+    /// 请求头（含 `\r\n\r\n`）之后的起始偏移
+    head_end: usize,
+}
+
+/// 从缓冲里解析请求行 + 请求头。返回 None 表示数据不完整或非法。
+fn parse_request(buf: &[u8]) -> Option<Request> {
+    let end = find_subslice(buf, b"\r\n\r\n")?;
+    if end + 4 > MAX_HEAD + 4 {
+        return None;
+    }
+    let head = std::str::from_utf8(&buf[..end]).ok()?;
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_ascii_uppercase();
+    let target = parts.next()?.to_string();
+    if parts.next().is_none() {
+        return None;
+    }
+
+    let mut headers = Vec::new();
+    let mut body_len = 0usize;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        if name.eq_ignore_ascii_case("content-length") {
+            body_len = value.parse().unwrap_or(0);
+        }
+        headers.push((name.trim().to_string(), value));
+    }
+    Some(Request {
+        method,
+        target,
+        headers,
+        body_len,
+        head_end: end + 4,
+    })
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
+}
+
+fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// 不该透传给上游的请求头
+fn hop_by_hop(name: &str) -> bool {
+    [
+        "host",
+        "authorization",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "accept-encoding",
+    ]
+    .iter()
+    .any(|h| name.eq_ignore_ascii_case(h))
+}
+
+// ---------------------------------------------------------------------------
+// 连接处理
+// ---------------------------------------------------------------------------
+
+fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    // SSE 长对话可能持续数分钟，写超时要给得足够宽
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
+
+    // 1. 读完请求头（+ body）
+    let mut buf = Vec::with_capacity(8 * 1024);
+    let mut tmp = [0u8; 8192];
+    let req = loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break None, // 对端关闭
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(req) = parse_request(&buf) {
+                    if buf.len() >= req.head_end() + req.body_len {
+                        break Some(req);
+                    }
+                }
+                if buf.len() > MAX_HEAD + MAX_BODY {
+                    break None;
+                }
+            }
+            Err(_) => break None,
+        }
+    };
+    let Some(req) = req else {
+        respond(&mut stream, 400, "text/plain", b"bad request", &[]);
+        return;
+    };
+
+    let Ok(dir) = commands::try_data_dir(&app) else {
+        respond(&mut stream, 500, "text/plain", b"internal error", &[]);
+        return;
+    };
+
+    // 2. 选账号：同一会话粘住同一个账号，新会话才按积分重新选
+    //
+    // 无鉴权：监听 127.0.0.1，来源只可能是本机进程（WorkBuddy 或调试用的 curl）。
+    let body_start = req.head_end;
+    let body = buf.get(body_start..body_start + req.body_len).unwrap_or(&[]);
+    let conv = header_value(&req, CONV_HEADER)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let Some(account) =
+        tauri::async_runtime::block_on(choose_account(&dir, conv.as_deref()))
+    else {
+        respond(&mut stream, 503, "text/plain", b"no account available", &[]);
+        return;
+    };
+    let settings = accounts::load_settings(&dir);
+    let host = settings.default_base_url;
+    let bare = normalize_target(&req.target);
+    let path = upstream_path(bare).to_string();
+    if bare == "/chat/completions" {
+        stealth::journal_append(
+            &dir,
+            "proxy_request",
+            &format!("长驻 CLI host 已使用接管端点（扣费账号：{}）", account.name),
+        );
+    }
+    let url = upstream_url(&host, &path);
+
+    // 3. 透传
+    let upstream = tauri::async_runtime::block_on(async {
+        let mut r = CLIENT
+            .request(
+                reqwest::Method::from_bytes(req.method.as_bytes())
+                    .unwrap_or(reqwest::Method::GET),
+                &url,
+            )
+            .bearer_auth(&account.token);
+        for (k, v) in &req.headers {
+            if !hop_by_hop(k) {
+                r = r.header(k.as_str(), v.as_str());
+            }
+        }
+        if !body.is_empty() {
+            r = r.body(body.to_vec());
+        }
+        r.send().await
+    });
+
+    match upstream {
+        Ok(resp) => stream_response(&mut stream, resp, &dir, &account, &host, &path, conv.as_deref()),
+        Err(e) => {
+            let msg = format!("upstream error: {e}");
+            stealth::journal_append(&dir, "proxy_upstream_error", &msg);
+            respond(&mut stream, 502, "text/plain", msg.as_bytes(), &[]);
+        }
+    }
+}
+
+fn upstream_url(host: &str, path: &str) -> String {
+    format!("{}{}", host.trim_end_matches('/'), path)
+}
+
+/// 请求目标可能是相对路径 `/chat/completions`，也可能是代理风格的绝对 URL。
+/// 上游只认相对路径，这里统一剥掉协议与主机部分。
+fn normalize_target(target: &str) -> &str {
+    match target.find("://") {
+        Some(i) => {
+            let rest = &target[i + 3..];
+            match rest.find('/') {
+                Some(p) => &rest[p..],
+                None => "/",
+            }
+        }
+        None => target,
+    }
+}
+
+/// 补上 CLI 在端点覆盖模式下丢掉的 `/v2` 前缀。
+///
+/// # 为什么必须由代理来补
+///
+/// CLI 直连官方网关时，请求的是 `https://copilot.tencent.com/v2/chat/completions`
+/// （`/v2` 由 CLI 自己拼上）；而一旦设置 `CODEBUDDY_BASE_URL`，它请求的路径就变成
+/// 裸的 `/chat/completions`。网关上这个裸路径**不存在**——APISIX 会 302 跳到官网，
+/// CLI 收到一页 HTML、解析出 0 个 SSE 数据事件，报
+/// `Empty stream: upstream gateway sent only placeholder chunks (chunks=0, bytes=0)`。
+/// 所以转发前必须改写成网关真实路由 `/v2/chat/completions`。
+fn upstream_path(path: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix("/chat/completions") {
+        // 精确匹配裸路径（可带查询串），避免误伤 /chat/completions-foo 之类的路径
+        if rest.is_empty() || rest.starts_with('?') {
+            return format!("/v2/chat/completions{rest}").into();
+        }
+    }
+    path.into()
+}
+
+/// 不该回给客户端的响应头（逐跳的，或 reqwest 已代劳解压后失效的）
+fn response_hop_by_hop(name: &str) -> bool {
+    [
+        "connection",
+        "content-length",
+        "transfer-encoding",
+        "content-encoding",
+    ]
+    .iter()
+    .any(|h| name.eq_ignore_ascii_case(h))
+}
+
+/// 写响应头。**一律用 chunked** —— 下游（CLI / 桌面端）按 SSE 解析，
+/// 缓冲成一次性 body 会让它报 `Empty stream` 并丢掉全部输出。
+fn write_head(
+    stream: &mut TcpStream,
+    status: u16,
+    ctype: &str,
+    headers: &[(String, String)],
+) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        302 => "Found",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: {ctype}\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: close\r\n"
+    );
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.flush()
+}
+
+/// 写一个 chunk 并**立刻 flush**：SSE 的实时性全靠这个
+fn write_chunk(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    stream.write_all(format!("{:X}\r\n", data.len()).as_bytes())?;
+    stream.write_all(data)?;
+    stream.write_all(b"\r\n")?;
+    stream.flush()
+}
+
+/// 终止 chunked 流
+fn write_chunk_end(stream: &mut TcpStream) -> std::io::Result<()> {
+    stream.write_all(b"0\r\n\r\n")?;
+    stream.flush()
+}
+
+/// 边收边转：上游出一个 chunk 就往下游写一个。
+///
+/// 中途出错只能断开 —— chunked 没有「出错补报」机制，但对端看到流被截断
+/// 至少比拿到一个空响应要好。
+fn stream_response(
+    stream: &mut TcpStream,
+    mut resp: reqwest::Response,
+    dir: &std::path::Path,
+    account: &accounts::Account,
+    host: &str,
+    path: &str,
+    conv: Option<&str>,
+) {
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let is_stream = ctype.contains("event-stream");
+
+    let mut headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter(|(k, _)| !response_hop_by_hop(k.as_str()))
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or_default().to_string()))
+        .collect();
+    // 只回 ASCII：账号名可能是中文，直接放进响应头会破坏报文
+    headers.push(("X-Proxy-Account-Id".into(), account.id.clone()));
+    headers.push(("X-Proxy-Host".into(), host.to_string()));
+
+    if write_head(stream, status, &ctype, &headers).is_err() {
+        return;
+    }
+
+    let mut bytes = 0usize;
+    let mut read_error: Option<String> = None;
+    tauri::async_runtime::block_on(async {
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    if write_chunk(stream, &chunk).is_err() {
+                        break; // 下游断了，不是上游的错
+                    }
+                    bytes += chunk.len();
+                }
+                Ok(None) => break,
+                // 上游读失败绝不能静默：吞掉的话 CLI 只会看到一个「干净」的空流，
+                // 报 Empty stream 却查不到原因。这里留痕到接管日志。
+                Err(e) => {
+                    read_error = Some(format!("上游读流失败（已转发 {bytes} 字节）：{e}"));
+                    break;
+                }
+            }
+        }
+    });
+    if let Some(msg) = read_error {
+        stealth::journal_append(dir, "proxy_stream_error", &format!("[{path}] {msg}"));
+    }
+    let _ = write_chunk_end(stream);
+
+    push_route(RouteLog {
+        at: chrono::Local::now().format("%H:%M:%S").to_string(),
+        account: account.name.clone(),
+        path: truncate_path(path),
+        conv: conv.map(|c| c.chars().take(8).collect()).unwrap_or_default(),
+        status,
+        stream: is_stream,
+    });
+}
+
+/// 取最近路由记录（新的在前）
+#[tauri::command]
+pub fn proxy_routes() -> Vec<RouteLog> {
+    recent_routes()
+}
+
+/// 路径可能很长（带查询串），展示时截断
+fn truncate_path(p: &str) -> String {
+    const MAX: usize = 48;
+    if p.chars().count() <= MAX {
+        return p.to_string();
+    }
+    format!("{}…", p.chars().take(MAX).collect::<String>())
+}
+
+impl Request {
+    /// 头结束（含 `\r\n\r\n`）之后的起始偏移
+    fn head_end(&self) -> usize {
+        self.head_end
+    }
+}
+
+/// 粘滞是否命中：命中返回账号 id，顺手清掉过期项。
+fn sticky_hit(conv: &str) -> Option<String> {
+    let mut map = sticky().lock().ok()?;
+    map.retain(|_, (at, _)| at.elapsed() < STICKY_TTL);
+    let (at, id) = map.get_mut(conv)?;
+    *at = Instant::now();
+    Some(id.clone())
+}
+
+fn sticky_put(conv: &str, account_id: String) {
+    if let Ok(mut map) = sticky().lock() {
+        map.insert(conv.to_string(), (Instant::now(), account_id));
+    }
+}
+
+/// 快照是否过期（决定新会话要不要重新打资源接口）
+fn snapshot_is_stale() -> bool {
+    last_snapshot()
+        .lock()
+        .ok()
+        .and_then(|l| *l)
+        .map(|t| t.elapsed() >= SNAPSHOT_TTL)
+        .unwrap_or(true)
+}
+
+fn cached_infos(ids: &[String]) -> Vec<CreditInfo> {
+    let map = cache().lock().ok();
+    ids.iter()
+        .map(|id| {
+            map.as_ref()
+                .and_then(|m| m.get(id))
+                .map(|(_, i)| *i)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn store_infos(ids: &[String], infos: &[CreditInfo]) {
+    if let Ok(mut m) = cache().lock() {
+        let now = Instant::now();
+        for (i, id) in ids.iter().enumerate() {
+            m.insert(id.clone(), (now, infos[i]));
+        }
+    }
+    if let Ok(mut l) = last_snapshot().lock() {
+        *l = Some(Instant::now());
+    }
+}
+
+/// 用户指定优先扣费账号时的定位：按 id 找，找得到返回下标。
+/// 独立成纯函数便于单测（选号规则里唯一需要「硬指定」语义的部分）。
+fn preferred_account_index(ids: &[String], preferred: Option<&str>) -> Option<usize> {
+    let pref = preferred?;
+    ids.iter().position(|id| id == pref)
+}
+
+/// 选出一个该用的账号。
+///
+/// 优先级从高到低：
+/// 1. **用户指定的优先扣费账号**——设置了就坚决用它（覆盖粘滞与轮换，测试扣费用）；
+/// 2. 会话粘滞——一次对话中途换账号会丢上下文；
+/// 3. 智能轮换——快照过期就重新拉，按「最旧积分」挑。
+///
+/// 若选中的账号触发了续签，会就地保存账号列表。
+async fn choose_account(dir: &PathBuf, conv: Option<&str>) -> Option<crate::accounts::Account> {
+    let mut accounts = accounts::load_accounts(dir);
+    if accounts.is_empty() {
+        return None;
+    }
+
+    // 0) 硬指定：优先扣费账号可用就非它不可
+    let preferred = accounts::load_settings(dir).preferred_account_id;
+    let ids: Vec<String> = accounts.iter().map(|a| a.id.clone()).collect();
+    if let Some(idx) = preferred_account_index(&ids, preferred.as_deref()) {
+        let mut account = accounts[idx].clone();
+        // 凭证临近过期先续签（失败不阻断，仍用旧 token 试）
+        if commands::ensure_fresh_token(&mut account).await.unwrap_or(false) {
+            if let Some(a) = accounts.iter_mut().find(|a| a.id == account.id) {
+                *a = account.clone();
+            }
+            let _ = accounts::save_accounts(dir, &accounts);
+        }
+        if let Some(conv) = conv {
+            sticky_put(conv, account.id.clone());
+        }
+        return Some(account);
+    }
+
+    // 1) 已在进行的会话：继续用同一个账号
+    if let Some(conv) = conv {
+        if let Some(id) = sticky_hit(conv) {
+            if let Some(a) = accounts.iter().find(|a| a.id == id) {
+                return Some(a.clone());
+            }
+        }
+    }
+
+    // 2) 新会话：快照过期就重新拉，然后按最旧积分挑
+    let mut infos = cached_infos(&ids);
+    if snapshot_is_stale() {
+        for (i, acct) in accounts.iter().enumerate() {
+            let host = commands::account_host(acct);
+            let snap = fetch_credit_snapshot(&CLIENT, &host, &acct.token).await;
+            infos[i] = CreditInfo {
+                expiry_ms: snap.earliest_expiry_ms,
+                credits: snap.credits,
+            };
+        }
+        store_infos(&ids, &infos);
+    }
+
+    let idx = pick_index(&ids, &infos)?;
+    let mut account = accounts[idx].clone();
+    // 选中的账号若凭证临近过期，先续签（失败不阻断，仍用旧 token 试）
+    if commands::ensure_fresh_token(&mut account).await.unwrap_or(false) {
+        if let Some(a) = accounts.iter_mut().find(|a| a.id == account.id) {
+            *a = account.clone();
+        }
+        let _ = accounts::save_accounts(dir, &accounts);
+    }
+    if let Some(conv) = conv {
+        sticky_put(conv, account.id.clone());
+    }
+    Some(account)
+}
+
+/// 写一个最简 HTTP 响应并关闭连接。
+fn respond(
+    stream: &mut TcpStream,
+    status: u16,
+    ctype: &str,
+    body: &[u8],
+    extra: &[(&str, &str)],
+) {
+    let reason = match status {
+        200 => "OK",
+        302 => "Found",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (k, v) in extra {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_request_head_and_body_length() {
+        let raw = b"POST /v2/billing/meter/daily-checkin?a=1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Request-Id: r1\r\n\r\n{}";
+        let req = parse_request(raw).unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.target, "/v2/billing/meter/daily-checkin?a=1");
+        assert_eq!(req.body_len, 2);
+        assert_eq!(req.head_end, raw.len() - 2);
+        assert_eq!(header_value(&req, "x-request-id"), Some("r1"));
+        assert_eq!(header_value(&req, "X-REQUEST-ID"), Some("r1"));
+    }
+
+    #[test]
+    fn rejects_incomplete_or_garbage_input() {
+        assert_eq!(parse_request(b"GET /x HTTP/1.1\r\n"), None, "头未读完");
+        assert_eq!(parse_request(b"garbage"), None);
+        // 请求行必须有三段
+        assert_eq!(parse_request(b"GET /x\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn hop_by_hop_filters_credentials_and_length() {
+        assert!(hop_by_hop("Authorization"));
+        assert!(hop_by_hop("content-length"));
+        assert!(!hop_by_hop("Content-Type"));
+        assert!(!hop_by_hop("Accept"));
+    }
+
+    #[test]
+    fn model_requests_use_the_configured_gateway() {
+        assert_eq!(
+            upstream_url("https://copilot.tencent.com/", "/chat/completions"),
+            "https://copilot.tencent.com/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalizes_absolute_and_relative_targets() {
+        // WorkBuddy 实测发的是相对路径
+        assert_eq!(normalize_target("/chat/completions"), "/chat/completions");
+        // 代理风格（绝对 URL）要把协议与主机剥掉，只留路径 + 查询串
+        assert_eq!(
+            normalize_target("http://copilot.tencent.com/v2/x?a=1"),
+            "/v2/x?a=1"
+        );
+        assert_eq!(normalize_target("https://host"), "/");
+    }
+
+    #[test]
+    fn rewrites_bare_chat_path_to_v2() {
+        // CLI 在端点覆盖模式下发的裸路径：必须补 /v2，否则网关 302 → CLI 报 Empty stream
+        assert_eq!(upstream_path("/chat/completions"), "/v2/chat/completions");
+        assert_eq!(
+            upstream_path("/chat/completions?a=b"),
+            "/v2/chat/completions?a=b"
+        );
+    }
+
+    #[test]
+    fn preferred_account_index_finds_exact_id() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(preferred_account_index(&ids, Some("b")), Some(1));
+        // 指定了但不存在 → None（自动降级为普通选号，而不是报错）
+        assert_eq!(preferred_account_index(&ids, Some("zzz")), None);
+        // 未指定 → None
+        assert_eq!(preferred_account_index(&ids, None), None);
+        // 空 id 同样视为未指定（配置层也会归一，这里双保险）
+        assert_eq!(preferred_account_index(&ids, Some("")), None);
+    }
+
+    #[test]
+    fn leaves_non_chat_paths_untouched() {
+        // 已带 /v2 的、以及其它任何路径都不动
+        assert_eq!(upstream_path("/v2/chat/completions"), "/v2/chat/completions");
+        assert_eq!(upstream_path("/v1/models"), "/v1/models");
+        assert_eq!(upstream_path("/"), "/");
+        // 前缀相同但不是同一个路径，不能误伤
+        assert_eq!(
+            upstream_path("/chat/completions-extra"),
+            "/chat/completions-extra"
+        );
+    }
+
+    #[test]
+    fn strips_hop_and_decompressed_headers_from_responses() {
+        assert!(response_hop_by_hop("Content-Length"));
+        assert!(response_hop_by_hop("transfer-encoding"));
+        // reqwest 已代劳解压，这个头留着会让对端以为内容还是 gzip
+        assert!(response_hop_by_hop("content-encoding"));
+        assert!(!response_hop_by_hop("Content-Type"));
+        assert!(!response_hop_by_hop("X-Request-Id"));
+    }
+
+    #[test]
+    fn sticky_session_reuses_the_same_account() {
+        // 一次对话中途换账号会丢上下文，必须粘住
+        let conv = "conv-abc";
+        assert!(sticky_hit(conv).is_none(), "首次访问不该命中");
+        sticky_put(conv, "acct-1".into());
+        assert_eq!(sticky_hit(conv).as_deref(), Some("acct-1"));
+        sticky_put(conv, "acct-2".into());
+        assert_eq!(
+            sticky_hit(conv).as_deref(),
+            Some("acct-2"),
+            "同一会话被改写后应跟随最新值"
+        );
+        // 别的会话互不干扰
+        assert!(sticky_hit("conv-other").is_none());
+    }
+
+    #[test]
+    fn sticky_entry_expires_after_ttl() {
+        let conv = "conv-expire";
+        sticky_put(conv, "acct-1".into());
+        // 把最后命中时刻拨回 TTL 之前
+        if let Ok(mut m) = sticky().lock() {
+            if let Some((at, _)) = m.get_mut(conv) {
+                *at = Instant::now() - STICKY_TTL - Duration::from_secs(1);
+            }
+        }
+        assert!(
+            sticky_hit(conv).is_none(),
+            "超过 TTL 的粘滞必须释放，好让新会话重新按积分选号"
+        );
+    }
+
+    /// 流式最容易写错的就是分块长度帧与终止帧，这里用一对真实 socket 端到端校验字节。
+    #[test]
+    fn chunked_encoding_frames_and_terminates_correctly() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut server = listener.accept().unwrap().0;
+
+        write_head(
+            &mut server,
+            200,
+            "text/event-stream",
+            &[("X-Proxy-Account-Id".to_string(), "a1".to_string())],
+        )
+        .unwrap();
+        // SSE 的一个事件帧，长度 13 → 十六进制 D
+        write_chunk(&mut server, b"data: hello\n\n").unwrap();
+        write_chunk(&mut server, b"data: [DONE]\n\n").unwrap();
+        write_chunk_end(&mut server).unwrap();
+        drop(server); // 关掉写端，让客户端 read 到 EOF
+
+        let mut out = String::new();
+        let _ = client.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = client.read_to_string(&mut out);
+
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "状态行：{out:?}");
+        assert!(out.contains("Transfer-Encoding: chunked"));
+        assert!(out.contains("Content-Type: text/event-stream"));
+        assert!(out.contains("X-Proxy-Account-Id: a1"), "自定义头要带上");
+        // 长度必须是十六进制且不含前导 0x
+        assert!(out.contains("\r\nD\r\ndata: hello\n\n\r\n"), "分块长度帧：{out:?}");
+        assert!(out.ends_with("0\r\n\r\n"), "必须以终止帧收尾：{out:?}");
+        // SSE 内容必须原样透传，不能被改写或缓冲
+        assert!(out.contains("data: [DONE]"));
+    }
+
+    /// 端到端：起一个本地 SSE 上游 → 用真实 reqwest 请求 → 走 `stream_response` 写到下游。
+    ///
+    /// 这是「边收边转」那条胶水的唯一自动化覆盖点：上游分块、我们解块再重新分块，
+    /// 哪一步写错都会在这里露出来。不碰任何全局配置，也不消耗真实配额。
+    #[test]
+    fn streams_an_sse_upstream_end_to_end() {
+        // 1) 本地 mock 上游：一次性返回一个 SSE 流（chunked）
+        let up = TcpListener::bind("127.0.0.1:0").unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = up.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf); // 读掉请求头，读多少算多少
+                let body = "data: {\"a\":1}\n\ndata: [DONE]\n\n";
+                let head = "HTTP/1.1 200 OK\r\n\
+                            Content-Type: text/event-stream\r\n\
+                            Transfer-Encoding: chunked\r\n\r\n";
+                let _ = s.write_all(head.as_bytes());
+                let _ = s.write_all(format!("{:X}\r\n{body}\r\n", body.len()).as_bytes());
+                let _ = s.write_all(b"0\r\n\r\n");
+                let _ = s.flush();
+            }
+        });
+
+        let resp = tauri::async_runtime::block_on(async {
+            CLIENT
+                .get(format!("http://127.0.0.1:{up_port}/chat/completions"))
+                .send()
+                .await
+        })
+        .expect("请求 mock 上游失败");
+
+        // 2) 下游：一对真实 socket
+        let down = TcpListener::bind("127.0.0.1:0").unwrap();
+        let down_port = down.local_addr().unwrap().port();
+        let mut client = TcpStream::connect(("127.0.0.1", down_port)).unwrap();
+        let mut server = down.accept().unwrap().0;
+
+        let acct = accounts::Account {
+            id: "acct-e2e".into(),
+            name: "端到端".into(),
+            phone: None,
+            token: "t".into(),
+            refresh_token: None,
+            expires_at: None,
+            base_url: None,
+            created_at: String::new(),
+            last: None,
+        };
+        stream_response(
+            &mut server,
+            resp,
+            std::path::Path::new("/tmp"),
+            &acct,
+            "mock.host",
+            "/chat/completions",
+            Some("conv-e2e"),
+        );
+        drop(server); // 关写端，让客户端读到 EOF
+
+        let mut out = String::new();
+        let _ = client.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = client.read_to_string(&mut out);
+
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "状态行：{out:?}");
+        assert!(out.contains("Transfer-Encoding: chunked"), "必须流式下发");
+        assert!(
+            out.contains("Content-Type: text/event-stream"),
+            "内容类型要透传：{out:?}"
+        );
+        assert!(out.contains("X-Proxy-Account-Id: acct-e2e"), "要带上选中账号");
+        // SSE 数据必须原样到达下游，不能被吞掉或改写成一次性 body
+        assert!(out.contains("data: {\"a\":1}"), "SSE 帧要透传：{out:?}");
+        assert!(out.contains("data: [DONE]"));
+        assert!(out.ends_with("0\r\n\r\n"), "必须以终止帧收尾：{out:?}");
+    }
+
+    #[test]
+    fn route_log_keeps_only_the_recent_window() {
+        for i in 0..(ROUTE_LOG_MAX + 12) {
+            push_route(RouteLog {
+                at: "00:00:00".into(),
+                account: format!("acct-{i}"),
+                path: "/chat/completions".into(),
+                conv: "abcdefgh".into(),
+                status: 200,
+                stream: true,
+            });
+        }
+        let log = recent_routes();
+        assert_eq!(log.len(), ROUTE_LOG_MAX, "超出上限的旧记录要丢弃");
+        // 新的在前
+        assert_eq!(log[0].account, format!("acct-{}", ROUTE_LOG_MAX + 11));
+    }
+
+    #[test]
+    fn routing_prefers_earliest_expiry_then_most_credits() {
+        let ids = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        let infos = vec![
+            CreditInfo { expiry_ms: Some(2000), credits: Some(100.0) },
+            CreditInfo { expiry_ms: Some(1000), credits: Some(10.0) }, // 最早过期 → 胜出
+            CreditInfo { expiry_ms: None, credits: Some(99999.0) },    // 未知 → 靠后
+            CreditInfo { expiry_ms: Some(500), credits: Some(0.0) },   // 积分为 0 → 跳过
+        ];
+        assert_eq!(pick_index(&ids, &infos), Some(1));
+
+        // 过期时间相同 → 剩余积分多者优先
+        let ids2 = vec!["a".into(), "b".into()];
+        let infos2 = vec![
+            CreditInfo { expiry_ms: Some(1000), credits: Some(10.0) },
+            CreditInfo { expiry_ms: Some(1000), credits: Some(500.0) },
+        ];
+        assert_eq!(pick_index(&ids2, &infos2), Some(1));
+    }
+
+    #[test]
+    fn routing_falls_back_to_first_when_everyone_is_empty() {
+        // 未知积分（可能还有余量）应优先于已知为 0 的账号
+        let ids = vec!["a".into(), "b".into()];
+        let infos = vec![
+            CreditInfo { expiry_ms: Some(100), credits: Some(0.0) },
+            CreditInfo::default(),
+        ];
+        assert_eq!(pick_index(&ids, &infos), Some(1));
+        // 全员已知为 0 → 谁都不入选，退化为第一个（让上游报错，比代理 503 更有信息量）
+        let ids2 = vec!["a".into(), "b".into()];
+        let infos2 = vec![
+            CreditInfo { expiry_ms: Some(100), credits: Some(0.0) },
+            CreditInfo { expiry_ms: Some(200), credits: Some(0.0) },
+        ];
+        assert_eq!(pick_index(&ids2, &infos2), Some(0));
+        assert_eq!(pick_index(&[], &[]), None, "没有账号就没有下标");
+    }
+}
