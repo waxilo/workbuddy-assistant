@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Account, JournalEvent, Settings, StealthStatus } from "../types";
 import {
   applySettings,
   getSettings,
   takeoverEvents,
+  clearTakeoverEvents,
   saveSettings,
   stealthStatus,
   stealthStop,
@@ -175,8 +176,45 @@ export function TakeoverPage({
 
   const live = stealth?.installed && stealth.alive;
 
+  /** 清空接管动态（不可恢复），清完刷新本地列表 */
+  const doClearEvents = async () => {
+    const ok = await askConfirm({
+      title: "清空接管动态",
+      body: "将删除全部接管事件记录（开启/关闭/账号启用/错误），此操作不可恢复。继续？",
+      okText: "清空",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await clearTakeoverEvents();
+      setEvents([]);
+      onToast({ kind: "ok", text: "接管动态已清空" });
+    } catch (e) {
+      onToast({ kind: "err", text: "清空失败：" + String(e) });
+    }
+  };
+
+  /**
+   * 连续相同（类型 + 内容都一样）的事件聚合为一条，附重复次数。
+   * 事件流是「新的在前」，相邻即时间连续——重启风暴、心跳重复这类刷屏只会占一行。
+   */
+  const groupedEvents = useMemo(() => {
+    const out: { e: JournalEvent; count: number }[] = [];
+    for (const e of events) {
+      const last = out[out.length - 1];
+      if (last && last.e.event === e.event && last.e.detail === e.detail) {
+        last.count += 1;
+      } else {
+        out.push({ e, count: 1 });
+      }
+    }
+    return out.slice(0, 80);
+  }, [events]);
+
   return (
     <section className="panel-page tk-page">
+      {/* ── 左列：开关 + 扣费账号 + 保存 ── */}
+      <div className="tk-left">
       {/* ── 接管开关 ── */}
       <div className={`tk-hero ${live ? "live" : ""}`}>
         <div className="tk-hero-main">
@@ -316,12 +354,22 @@ export function TakeoverPage({
             : "保存"}
         </button>
       </div>
+      </div>
 
-      {/* ── 接管动态（事件时间线） ── */}
-      <div className="tk-section">
+      {/* ── 右列：接管动态（事件时间线，内部滚动） ── */}
+      <div className="tk-section tk-feed">
         <div className="tk-sec-head">
           <h3>接管动态</h3>
           <span className="tk-sec-meta">开启 / 关闭 / 每个会话开始用哪个账号 / 异常</span>
+          <span className="spacer" />
+          <button
+            className="btn small ghost"
+            disabled={events.length === 0}
+            title="删除全部接管事件记录，不可恢复"
+            onClick={() => void doClearEvents()}
+          >
+            清空
+          </button>
         </div>
         {events.length === 0 ? (
           <p className="hint">
@@ -329,12 +377,17 @@ export function TakeoverPage({
           </p>
         ) : (
           <ul className="evt-list">
-            {events.slice(0, 50).map((e, i) => {
+            {groupedEvents.map(({ e, count }, i) => {
               const k = eventKind(e);
               return (
-                <li key={`${e.at_ms}-${i}`} className={`evt evt-${k.cls}`}>
+                <li
+                  key={`${e.at_ms}-${i}`}
+                  className={`evt evt-${k.cls}`}
+                  title={count > 1 ? `相同事件连续出现 ${count} 次` : undefined}
+                >
                   <span className="e-at">{e.at}</span>
                   <span className={`e-tag tag-${k.cls}`}>{k.label}</span>
+                  {count > 1 && <span className="e-count">×{count}</span>}
                   <span className="e-detail">{e.detail}</span>
                 </li>
               );

@@ -401,6 +401,17 @@ pub fn takeover_events(app: tauri::AppHandle) -> Vec<JournalEvent> {
     all
 }
 
+/// 清空接管动态（不可恢复）：把事件日志文件截断为空。
+#[tauri::command]
+pub fn takeover_events_clear(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = crate::commands::try_data_dir(&app)?;
+    let path = journal_path(&dir);
+    if path.exists() {
+        fs::write(&path, "").map_err(|e| format!("清空接管动态失败：{e}"))?;
+    }
+    Ok(())
+}
+
 /// 安全停止接管：摘掉端点后重启 WorkBuddy，清除长驻 CLI host 缓存，再停止监听。
 #[tauri::command]
 pub fn stealth_stop(app: tauri::AppHandle) -> Result<StealthStatus, String> {

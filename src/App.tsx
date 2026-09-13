@@ -298,13 +298,17 @@ export default function App() {
     }
   }, [load, showToast]);
 
+  // 检查更新：结果只走一个通用 toast（顶部）。
+  // update-bar（底部胶囊）只留给「下载中/安装中」这类过程态，
+  // 避免「已是最新版本」同时弹顶部 toast + 底部胶囊两条通知。
   const onUpdate = useCallback(async () => {
     await checkAndInstall((p) => {
-      setUpdate(p);
-      if (p.status === "error" || p.status === "no-update") {
+      if (p.status === "no-update" || p.status === "error") {
+        setUpdate(null); // 收起「正在检查更新…」的过程条
         showToast({ kind: p.status === "error" ? "err" : "info", text: p.message });
-        window.setTimeout(() => setUpdate(null), 2600);
+        return;
       }
+      setUpdate(p);
     });
   }, [showToast]);
 
@@ -414,7 +418,7 @@ export default function App() {
           )}
         </header>
 
-        <main className="content">
+        <main className={"content" + (page === "takeover" ? " content-fill" : "")}>
           {page === "accounts" && (
             <AccountsPage
               accounts={accounts}

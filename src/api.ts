@@ -124,3 +124,5 @@ export const proxyRoutes = () => invoke<RouteLog[]>("proxy_routes");
 
 /** 接管事件流（新的在前）：开启 / 关闭 / 开始使用账号 / 重启 / 错误 */
 export const takeoverEvents = () => invoke<JournalEvent[]>("takeover_events");
+/** 清空接管动态（不可恢复） */
+export const clearTakeoverEvents = () => invoke<void>("takeover_events_clear");
