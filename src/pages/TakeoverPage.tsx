@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Account, JournalEvent, Settings, StealthStatus } from "../types";
+import type { Account, FreeModelsReport, JournalEvent, Settings, StealthStatus } from "../types";
 import {
   applySettings,
   takeoverEvents,
   clearTakeoverEvents,
   saveSettings,
   stealthStatus,
+  freeModels,
 } from "../api";
 import { maskPhone } from "../common";
 import type { ConfirmReq, Toast } from "../common";
@@ -71,6 +72,10 @@ export function TakeoverPage({
   const [events, setEvents] = useState<JournalEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // 限流切换说明弹窗：展示支持无感切换的免费模型，支持手动刷新
+  const [fmOpen, setFmOpen] = useState(false);
+  const [fm, setFm] = useState<FreeModelsReport | null>(null);
+  const [fmBusy, setFmBusy] = useState(false);
 
   const allIds = useMemo(() => accounts.map((a) => a.id), [accounts]);
   /** 实际生效的勾选集：未指定时视为全选 */
@@ -112,9 +117,23 @@ export function TakeoverPage({
     }
   };
 
+  /** 拉取限流切换支持的模型列表（refresh=true 忽略缓存强制重拉） */
+  const loadFreeModels = useCallback(
+    async (refresh: boolean) => {
+      setFmBusy(true);
+      try {
+        setFm(await freeModels(refresh));
+      } catch (e) {
+        onToast({ kind: "err", text: "拉取模型列表失败：" + String(e) });
+      } finally {
+        setFmBusy(false);
+      }
+    },
+    [onToast]
+  );
+
   /** 组装一份以当前界面状态为准的设置 */
-  const snapshot = (over?: Partial<Settings>): Settings => ({
-    ...settings,
+  const snapshot = (over?: Partial<Settings>): Settings => ({    ...settings,
     proxy_enabled: proxyOn,
     proxy_port: Number(proxyPort) || 8787,
     billing_account_ids: billing,
@@ -303,6 +322,16 @@ export function TakeoverPage({
           <span className="spacer" />
           <button
             className="btn small ghost"
+            title="查看哪些模型支持限流无感切换（可刷新拉取最新）"
+            onClick={() => {
+              setFmOpen(true);
+              if (!fm) void loadFreeModels(false);
+            }}
+          >
+            限流切换说明
+          </button>
+          <button
+            className="btn small ghost"
             disabled={events.length === 0}
             title="删除全部接管事件记录，不可恢复"
             onClick={() => void doClearEvents()}
@@ -408,6 +437,55 @@ export function TakeoverPage({
                 onClick={() => void doSaveBilling()}
               >
                 {busy ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 限流切换说明弹框：免费模型列表 + 手动刷新 ── */}
+      {fmOpen && (
+        <div className="modal-mask" onClick={() => setFmOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>限流切换说明</h2>
+            <p className="hint">
+              免费模型（积分倍率 x0.00）触发限流（429）时，代理会把该账号冷却 10 分钟、
+              自动换备用账号重发同一请求，对话完全无感；付费模型的限流会原样透传。
+              以下列表从网关动态拉取（缓存 1 小时），腾讯增删免费模型后点「刷新」即可同步。
+            </p>
+            {fm == null ? (
+              <p className="hint">加载中…</p>
+            ) : fm.models.length === 0 ? (
+              <p className="hint">暂未发现免费模型。</p>
+            ) : (
+              <ul className="fm-chips">
+                {fm.models.map((m) => (
+                  <li key={m} className="fm-chip">
+                    {m}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {fm && (
+              <p className="hint fm-source">
+                {fm.source === "fetched"
+                  ? "来源：刚从网关拉取"
+                  : fm.source === "cache"
+                  ? "来源：缓存（1 小时内有效）"
+                  : "来源：内置兜底列表（网关拉取失败，可点「刷新」重试）"}
+              </p>
+            )}
+            <div className="modal-actions">
+              <button
+                className="btn"
+                disabled={fmBusy}
+                onClick={() => void loadFreeModels(true)}
+              >
+                {fmBusy ? "刷新中…" : "刷新"}
+              </button>
+              <span className="spacer" />
+              <button className="btn primary" onClick={() => setFmOpen(false)}>
+                关闭
               </button>
             </div>
           </div>

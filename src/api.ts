@@ -12,6 +12,7 @@ import type {
   NetRestoreReport,
   StealthStatus,
   JournalEvent,
+  FreeModelsReport,
 } from "./types";
 
 export const listAccounts = () => invoke<Account[]>("list_accounts");
@@ -116,3 +117,10 @@ export const stealthStatus = () => invoke<StealthStatus>("stealth_status");
 export const takeoverEvents = () => invoke<JournalEvent[]>("takeover_events");
 /** 清空接管动态（不可恢复） */
 export const clearTakeoverEvents = () => invoke<void>("takeover_events_clear");
+
+/**
+ * 「限流切换」支持的免费模型列表（积分倍率 x0.00，从网关动态拉取，缓存 1 小时）。
+ * refresh=true 时忽略缓存强制重拉。
+ */
+export const freeModels = (refresh: boolean) =>
+  invoke<FreeModelsReport>("free_models", { refresh });

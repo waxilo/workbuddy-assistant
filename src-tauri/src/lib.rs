@@ -70,10 +70,11 @@ pub fn run() {
             netfix::net_diagnose,
             netfix::net_restore,
             netfix::reveal_path,
-            // 无感接管：状态查询 / 事件流
+            // 无感接管：状态查询 / 事件流 / 限流切换支持模型（弹窗展示 + 手动刷新）
             stealth::stealth_status,
             stealth::takeover_events_clear,
             stealth::takeover_events,
+            proxy::free_models,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

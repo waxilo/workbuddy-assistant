@@ -1075,6 +1075,30 @@ body {
   display: grid;
   gap: 8px;
 }
+
+/* 限流切换说明弹框：免费模型 chips */
+.fm-chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 6px;
+  padding: 0;
+}
+.fm-chip {
+  padding: 3px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--primary-d);
+  background: #eaefff;
+  border: 1px solid #d5defb;
+}
+.fm-source {
+  font-size: 12px;
+  color: var(--muted);
+}
 /* 弹框里的账号过滤输入框 */
 .acct-filter {
   margin: 0 0 10px !important;

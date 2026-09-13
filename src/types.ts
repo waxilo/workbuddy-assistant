@@ -194,3 +194,10 @@ export interface JournalEvent {
   event: string;
   detail: string;
 }
+
+/** 「限流切换」支持的免费模型列表（从网关动态拉取） */
+export interface FreeModelsReport {
+  models: string[];
+  /** fetched = 刚从网关拉取；cache = 1 小时缓存内；fallback = 拉取失败用内置兜底 */
+  source: "fetched" | "cache" | "fallback";
+}

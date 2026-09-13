@@ -597,6 +597,67 @@ fn is_free_model(model: Option<&str>, free: &HashSet<String>) -> bool {
     model.is_some_and(|m| free.contains(m))
 }
 
+/// 「限流切换」支持的模型（供 UI 弹窗展示与手动刷新）
+#[derive(serde::Serialize)]
+pub struct FreeModelsReport {
+    pub models: Vec<String>,
+    /// "fetched" = 刚从网关拉取；"cache" = 1 小时缓存内；"fallback" = 拉取失败用内置兜底
+    pub source: String,
+}
+
+fn sorted_models(set: &HashSet<String>) -> Vec<String> {
+    let mut v: Vec<String> = set.iter().cloned().collect();
+    v.sort();
+    v
+}
+
+/// 免费模型列表（限流切换的生效范围）：优先读缓存；`refresh=true` 或缓存过期时
+/// 用任一账号的 token 从网关重新拉取（倍率 x0.00 的模型）。UI 弹窗展示 + 手动刷新。
+#[tauri::command]
+pub async fn free_models(
+    app: tauri::AppHandle,
+    refresh: Option<bool>,
+) -> Result<FreeModelsReport, String> {
+    let dir = crate::commands::try_data_dir(&app)?;
+    if !refresh.unwrap_or(false) {
+        if let Ok(guard) = free_models_cache().lock() {
+            if let Some((at, set)) = guard.as_ref() {
+                if at.elapsed() < FREE_MODELS_TTL {
+                    return Ok(FreeModelsReport {
+                        models: sorted_models(set),
+                        source: "cache".into(),
+                    });
+                }
+            }
+        }
+    }
+    let settings = accounts::load_settings(&dir);
+    let mut account = accounts::load_accounts(&dir)
+        .into_iter()
+        .find(|a| !a.token.is_empty())
+        .ok_or_else(|| "暂无账号，无法拉取模型列表".to_string())?;
+    // token 临近过期就先续签（不落盘也无妨：落盘版只在路由时做，这里仅求拉取成功）
+    let _ = commands::ensure_fresh_token(&mut account).await;
+    match fetch_free_models(&settings.default_base_url, &account.token).await {
+        Some(set) if !set.is_empty() => {
+            if let Ok(mut g) = free_models_cache().lock() {
+                *g = Some((Instant::now(), set.clone()));
+            }
+            Ok(FreeModelsReport {
+                models: sorted_models(&set),
+                source: "fetched".into(),
+            })
+        }
+        _ => Ok(FreeModelsReport {
+            models: FALLBACK_FREE_MODELS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            source: "fallback".into(),
+        }),
+    }
+}
+
 /// 不该回给客户端的响应头（逐跳的，或 reqwest 已代劳解压后失效的）
 fn response_hop_by_hop(name: &str) -> bool {
     [
