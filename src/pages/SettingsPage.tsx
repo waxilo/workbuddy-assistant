@@ -6,7 +6,7 @@ import type { Toast } from "../common";
 /**
  * 「设置」页：定时签到 / 通知 / 风控 / 自启动等常规配置。
  *
- * 网络急救与无感接管都已是独立页面，这里不再混排；
+ * 网络急救与智能接管都已是独立页面，这里不再混排；
  * 接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
  */
 export function SettingsPage({
@@ -56,7 +56,7 @@ export function SettingsPage({
   };
 
   // 默认 Base URL 是内置常量，界面不提供修改入口（改错会让签到打到错误的域）；
-  // 接管相关字段本页没有编辑权，原样透传（它们归「无感接管」页管）
+  // 接管相关字段本页没有编辑权，原样透传（它们归「智能接管」页管）
   const snapshot = (): Settings => ({
     ...settings,
     auto_checkin_on_start: auto,

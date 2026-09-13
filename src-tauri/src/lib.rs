@@ -29,7 +29,7 @@ pub fn run() {
             // 定时自动签到：独立后台线程，与进程同生命周期。
             // 只在应用运行期间生效——桌面端退出后没有守护进程可代为执行。
             scheduler::spawn(app.handle().clone());
-            // 本地反代（按积分过期时间优先路由）+ 无感接管的装卸与心跳
+            // 本地反代（按积分过期时间优先路由）+ 智能接管的装卸与心跳
             proxy::spawn(app.handle().clone());
             // 系统托盘：后台常驻入口
             tray::setup(app.handle())
@@ -70,7 +70,7 @@ pub fn run() {
             netfix::net_diagnose,
             netfix::net_restore,
             netfix::reveal_path,
-            // 无感接管：状态查询 / 事件流 / 限流切换支持模型（弹窗展示 + 手动刷新）
+            // 智能接管：状态查询 / 事件流 / 限流切换支持模型（弹窗展示 + 手动刷新）
             stealth::stealth_status,
             stealth::takeover_events_clear,
             stealth::takeover_events,

@@ -41,7 +41,7 @@ export function NetfixPage({
     const ok = await askConfirm({
       title: "一键恢复网络配置",
       body:
-        "会依次：安全关闭无感接管并重启 WorkBuddy/CLI host、备份并清除全局调试端点、" +
+        "会依次：安全关闭智能接管并重启 WorkBuddy/CLI host、备份并清除全局调试端点、" +
         "取消 launchd 全局环境变量，最后复检。被改动的文件都会先备份。继续？",
       okText: "恢复",
       danger: true,

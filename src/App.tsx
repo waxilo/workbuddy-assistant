@@ -28,7 +28,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 /**
  * 应用外壳：左侧导航栏 + 右侧内容区。
  *
- * 页面（tab）承载常驻功能：账号签到 / 无感接管 / 网络急救 / 签到日志 / 设置；
+ * 页面（tab）承载常驻功能：账号签到 / 智能接管 / 网络急救 / 签到日志 / 设置；
  * 弹窗只留给「做完即走」的任务流（登录新账号、导入本机账号、危险操作确认）。
  */
 type Page = "accounts" | "takeover" | "netfix" | "logs" | "settings";
@@ -37,7 +37,7 @@ type Modal = { type: "local" } | { type: "oauth" } | null;
 
 const NAV: { key: Page; label: string; icon: string }[] = [
   { key: "accounts", label: "账号签到", icon: "✓" },
-  { key: "takeover", label: "无感接管", icon: "⇄" },
+  { key: "takeover", label: "智能接管", icon: "⇄" },
   { key: "netfix", label: "网络急救", icon: "✚" },
   { key: "logs", label: "签到日志", icon: "☰" },
   { key: "settings", label: "设置", icon: "⚙" },
@@ -45,7 +45,7 @@ const NAV: { key: Page; label: string; icon: string }[] = [
 
 const PAGE_TITLES: Record<Page, string> = {
   accounts: "账号签到",
-  takeover: "无感接管",
+  takeover: "智能接管",
   netfix: "网络急救",
   logs: "签到日志",
   settings: "设置",

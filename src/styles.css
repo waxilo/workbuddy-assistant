@@ -663,13 +663,13 @@ body {
   color: var(--primary);
 }
 
-/* 「正常」一级：本应用自己的无感接管在跑，不该被当成问题看 */
+/* 「正常」一级：本应用自己的智能接管在跑，不该被当成问题看 */
 .net-item.ok {
   border-left-color: var(--ok);
   background: var(--panel-2);
 }
 
-/* 危险操作前的醒目说明（无感接管会改 WorkBuddy 的全局端点） */
+/* 危险操作前的醒目说明（智能接管会改 WorkBuddy 的全局端点） */
 .hint.danger-hint {
   border-left: 3px solid var(--warn);
   background: var(--panel-2);
@@ -896,7 +896,7 @@ body {
   font-size: 13px;
 }
 
-/* ── 无感接管页（紧凑控制条 + 动态铺满） ───────────────────── */
+/* ── 智能接管页（紧凑控制条 + 动态铺满） ───────────────────── */
 
 /* 接管页内容区撑满可用高度（页面不出滚动条，动态列表内部滚动） */
 .content-fill {

@@ -71,7 +71,7 @@ pub struct Settings {
     /// 手动「全部签到」结束后推送（默认关，避免连点造成刷屏）
     #[serde(default)]
     pub notify_on_manual: bool,
-    /// 无感接管总开关（127.0.0.1 反代 + 把 WorkBuddy 端点指向它，按积分过期时间优先路由）。
+    /// 智能接管总开关（127.0.0.1 反代 + 把 WorkBuddy 端点指向它，按积分过期时间优先路由）。
     /// 这是 WorkBuddy 专用通道：只监听本机、无鉴权 Key、无独立「仅反代」模式。
     #[serde(default)]
     pub proxy_enabled: bool,

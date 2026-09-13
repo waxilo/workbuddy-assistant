@@ -110,7 +110,7 @@ export const netRestore = () => invoke<NetRestoreReport>("net_restore");
 /** 在系统文件管理器里定位某个文件（用于查看备份） */
 export const revealPath = (path: string) => invoke<void>("reveal_path", { path });
 
-/** 查询无感接管状态（只读） */
+/** 查询智能接管状态（只读） */
 export const stealthStatus = () => invoke<StealthStatus>("stealth_status");
 
 /** 接管事件流（新的在前）：开启 / 关闭 / 开始使用账号 / 重启 / 错误 */

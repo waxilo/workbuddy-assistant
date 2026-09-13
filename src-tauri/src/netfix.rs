@@ -446,7 +446,7 @@ fn desktop_stale_takeover(home: &Path, data_dir: &Path) -> Option<NetIssue> {
     })
 }
 
-/// 这个端点是「本应用无感接管」自己装的吗？
+/// 这个端点是「本应用智能接管」自己装的吗？
 ///
 /// 是且心跳还在 → 报成 `ok`（正常工作中），不污染 `healthy`，免得用户点「一键恢复」
 /// 把自己刚开的功能关掉；心跳停了 → 那是崩溃留下的僵尸，按常规判定，会被判成会断网。
@@ -459,7 +459,7 @@ fn self_issue(data_dir: &Path, label: &str, key: &str, val: &str) -> Option<NetI
     Some(NetIssue {
         id: format!("file:{label}:env.{key}"),
         scope: if alive {
-            "无感接管".into()
+            "智能接管".into()
         } else {
             "配置文件".into()
         },
@@ -469,12 +469,12 @@ fn self_issue(data_dir: &Path, label: &str, key: &str, val: &str) -> Option<NetI
         level: if alive { "ok".into() } else { "block".into() },
         note: if alive {
             format!(
-                "本应用「无感接管」正在工作：对话请求经 127.0.0.1:{} 转发，按最旧积分自动选账号。\
-                 这是你自己开的功能，不需要处理；想停用请在上方关闭「无感接管」。",
+                "本应用「智能接管」正在工作：对话请求经 127.0.0.1:{} 转发，按最旧积分自动选账号。\
+                 这是你自己开的功能，不需要处理；想停用请在上方关闭「智能接管」。",
                 lease.port
             )
         } else {
-            "这是本应用「无感接管」写下的端点，但心跳已停（应用可能崩溃退出）——\
+            "这是本应用「智能接管」写下的端点，但心跳已停（应用可能崩溃退出）——\
              它就是现在断网的原因，清掉即可恢复。".into()
         },
         fixable: true,
@@ -627,7 +627,7 @@ fn clear_launchd() -> Vec<NetStep> {
     steps
 }
 
-/// 关掉无感接管（本地反代 + 接管是一个开关）—— 就是用户要的「在页面上操作关闭」
+/// 关掉智能接管（本地反代 + 接管是一个开关）—— 就是用户要的「在页面上操作关闭」
 ///
 /// **顺序要紧**：必须先关掉开关，再去摘端点。反着来的话，反代的监督线程
 /// 会在下一次轮询（2 秒内）发现开关还开着，立刻又把端点装回去，恢复等于白做。
@@ -639,7 +639,7 @@ fn disable_proxy(data_dir: &Path) -> (Vec<NetStep>, bool) {
     settings.proxy_enabled = false;
     let ok = crate::accounts::save_settings(data_dir, &settings).is_ok();
     let steps = vec![NetStep {
-        action: "关闭无感接管".into(),
+        action: "关闭智能接管".into(),
         ok,
         detail: if ok {
             "已关闭，监听端口已释放，监督线程不会再写端点。".into()
@@ -968,7 +968,7 @@ mod tests {
         let _ = fs::remove_dir_all(home.parent().unwrap());
     }
 
-    /// 正在工作的无感接管**不是**污染 —— 否则用户点一次「一键恢复」就把自己刚开的功能关了。
+    /// 正在工作的智能接管**不是**污染 —— 否则用户点一次「一键恢复」就把自己刚开的功能关了。
     #[test]
     fn live_stealth_takeover_is_reported_as_healthy_not_pollution() {
         let (home, data) = sandbox();
@@ -978,7 +978,7 @@ mod tests {
         let hit = rep
             .issues
             .iter()
-            .find(|i| i.scope == "无感接管")
+            .find(|i| i.scope == "智能接管")
             .expect("应把本应用的接管认出来");
         assert_eq!(hit.level, "ok", "活的接管不该报成 block/warn");
         assert!(rep.healthy, "接管生效时不能显示成「网络有问题」");

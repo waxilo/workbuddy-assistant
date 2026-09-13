@@ -41,7 +41,7 @@ export interface Settings {
   /** 手动「全部签到」后推送 */
   notify_on_manual: boolean;
   /**
-   * 无感接管总开关（WorkBuddy 专用反代）：开启 = 监听 127.0.0.1 并把 WorkBuddy
+   * 智能接管总开关（WorkBuddy 专用反代）：开启 = 监听 127.0.0.1 并把 WorkBuddy
    * 端点指向它，按积分过期时间优先路由；关闭 = 停止监听并摘掉端点。无鉴权 Key。
    */
   proxy_enabled: boolean;
@@ -141,7 +141,7 @@ export interface NetIssue {
   value: string;
   /**
    * block = 会让网络不通；warn = 残留但当前不影响连通性；
-   * ok = 正常状态（例如本应用无感接管正在工作），不算问题
+   * ok = 正常状态（例如本应用智能接管正在工作），不算问题
    */
   level: "block" | "warn" | "ok";
   note: string;
@@ -172,7 +172,7 @@ export interface NetRestoreReport {
   report: NetReport;
 }
 
-/** 无感接管的当前状态 */
+/** 智能接管的当前状态 */
 export interface StealthStatus {
   /** 设置里是否开启 */
   enabled: boolean;
