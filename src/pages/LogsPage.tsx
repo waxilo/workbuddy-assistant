@@ -92,18 +92,20 @@ export function LogsPage({
         <ul className="log-list page-list">
           {logs.map((l) => (
             <li key={l.id} className="log-item">
-              <div className="log-head">
-                <LogBadge log={l} />
-                <span className="log-name">
-                  {accountLabel(l.account_name, l.account_phone)}
-                </span>
-                <span className="log-time">{l.at}</span>
+              <div className="log-main">
+                <div className="log-head">
+                  <LogBadge log={l} />
+                  <span className="log-name">
+                    {accountLabel(l.account_name, l.account_phone)}
+                  </span>
+                </div>
+                <div className="log-meta">
+                  {l.balance != null && <span>剩余 {formatCredits(l.balance)}</span>}
+                  {l.credit != null && <span>本次 +{l.credit}</span>}
+                </div>
+                {l.message && <div className="log-msg">{l.message}</div>}
               </div>
-              <div className="log-meta">
-                {l.balance != null && <span>剩余 {formatCredits(l.balance)}</span>}
-                {l.credit != null && <span>本次 +{l.credit}</span>}
-              </div>
-              {l.message && <div className="log-msg">{l.message}</div>}
+              <span className="log-time">{l.at}</span>
             </li>
           ))}
         </ul>
