@@ -408,12 +408,45 @@ pub fn takeover_events(app: tauri::AppHandle) -> Vec<JournalEvent> {
     let Ok(dir) = crate::commands::try_data_dir(&app) else {
         return Vec::new();
     };
-    let mut all: Vec<_> = journal_read(&dir)
+    let all = journal_read(&dir)
         .into_iter()
         .filter(|e| e.event != "proxy_request")
-        .collect();
-    all.reverse();
-    all
+        .collect::<Vec<_>>();
+    let merged = merge_install_restart(all);
+    let mut out = merged;
+    out.reverse();
+    out
+}
+
+/// 展示层聚合：开启接管后如果同秒（≤1s）紧跟着一条「重启 WorkBuddy」，
+/// 把后者合并进开启事件的 detail，避免同一动作拆成两条刷屏。
+///
+/// 注意：这里正向处理（时间从早到晚），因为 restart 一定发生在 install 之后。
+fn merge_install_restart(events: Vec<JournalEvent>) -> Vec<JournalEvent> {
+    if events.len() < 2 {
+        return events;
+    }
+    let mut out = Vec::with_capacity(events.len());
+    let mut i = 0;
+    while i < events.len() {
+        let mut cur = events[i].clone();
+        if cur.event == "install"
+            && i + 1 < events.len()
+            && events[i + 1].event == "restart_workbuddy"
+            && events[i + 1].at_ms.saturating_sub(cur.at_ms) <= 1000
+        {
+            let restart_detail = &events[i + 1].detail;
+            if !restart_detail.is_empty() {
+                cur.detail = format!("{}；{}", cur.detail, restart_detail);
+            }
+            out.push(cur);
+            i += 2;
+        } else {
+            out.push(cur);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// 清空接管动态（不可恢复）：把事件日志文件截断为空。
@@ -591,6 +624,34 @@ mod tests {
         assert!(events[0].detail.contains("8787"));
 
         let _ = fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    #[test]
+    fn merge_install_restart_combines_same_second_events() {
+        let mk = |ms: i64, event: &str| JournalEvent {
+            at_ms: ms,
+            at: String::new(),
+            event: event.to_string(),
+            detail: if event == "install" {
+                "接管已开启：端点写入 env.CODEBUDDY_BASE_URL=http://127.0.0.1:8787".to_string()
+            } else {
+                "WorkBuddy 已重启；长驻 CLI host 终止 1 个".to_string()
+            },
+        };
+        // 开启后 200ms 紧接重启：应合并为一条 install，且 detail 带上重启信息
+        let merged = merge_install_restart(vec![mk(1_000, "install"), mk(1_200, "restart_workbuddy")]);
+        assert_eq!(merged.len(), 1, "两条同秒事件应合并为一条");
+        assert_eq!(merged[0].event, "install");
+        assert!(merged[0].detail.contains("已重启"), "detail 应含重启信息：{}", merged[0].detail);
+        assert!(merged[0].detail.contains("终止 1 个"));
+
+        // 间隔超过 1s：不合并（可能是用户隔了很久手动重启）
+        let kept = merge_install_restart(vec![mk(1_000, "install"), mk(3_000, "restart_workbuddy")]);
+        assert_eq!(kept.len(), 2, "非同秒不应合并");
+
+        // 顺序颠倒（restart 在 install 前）：不合并，保持原样
+        let reordered = merge_install_restart(vec![mk(1_000, "restart_workbuddy"), mk(1_200, "install")]);
+        assert_eq!(reordered.len(), 2);
     }
 
     #[test]
