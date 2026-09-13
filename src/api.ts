@@ -23,6 +23,17 @@ export const listAccounts = () => invoke<Account[]>("list_accounts");
 export const importAccounts = (items: ImportItem[]) =>
   invoke<ImportReport>("import_accounts", { items });
 
+/**
+ * 导出全部账号到指定 JSON 文件（含 token / refresh_token，注意保密）。
+ * 返回写入的文件路径。
+ */
+export const exportAccounts = (path: string) =>
+  invoke<string>("export_accounts", { path });
+
+/** 从导出文件导入账号：按手机号 / token 合并补全，不会产生重复条目 */
+export const importAccountsFile = (path: string) =>
+  invoke<ImportReport>("import_accounts_file", { path });
+
 export const removeAccount = (id: string) =>
   invoke<void>("remove_account", { id });
 

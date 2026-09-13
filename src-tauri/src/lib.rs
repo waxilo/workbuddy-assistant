@@ -19,6 +19,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         // 用 LaunchAgent 而非 AppleScript，登录时静默启动、不弹窗
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -46,6 +47,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_accounts,
             commands::import_accounts,
+            commands::import_accounts_file,
+            commands::export_accounts,
             commands::remove_account,
             commands::checkin_one,
             commands::checkin_all,

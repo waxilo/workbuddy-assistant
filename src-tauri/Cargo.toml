@@ -18,6 +18,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# 文件对话框：账号导出 / 导入选路径用
+tauri-plugin-dialog = "2"
 # 开机自启动：定时签到只有应用在跑才可能触发，所以由应用自己注册登录启动项。
 # 只在 Rust 侧调用（`app.autolaunch()`），因此不需要前端 npm 包，也不需要额外 capability。
 tauri-plugin-autostart = "2"

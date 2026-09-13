@@ -197,6 +197,125 @@ pub(crate) fn merge_import(accounts: &mut Vec<Account>, items: Vec<ImportItem>) 
     ImportReport { added, updated }
 }
 
+// ── 账号导出 / 导入（跨机器迁移）────────────────────────────────────────────
+
+/// 导出文件里的一条账号（只带迁移必需字段，不带签到状态）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
+struct ExportAccount {
+    token: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    phone: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_at: Option<i64>,
+    /// 兼容两代字段名：导出写 base_url，导入同时认 base_url / host
+    #[serde(default, alias = "host")]
+    base_url: Option<String>,
+}
+
+/// 导出文件结构：带 kind 标记，导入时据此识别（也容忍裸数组）。
+#[derive(serde::Serialize)]
+struct ExportWrapper<'a> {
+    app: &'a str,
+    kind: &'a str,
+    version: u32,
+    exported_at: &'a str,
+    accounts: Vec<ExportAccount>,
+}
+
+/// 导出 JSON 本体（纯函数，便于单测）。
+pub(crate) fn build_export_json(accounts: &[Account], exported_at: &str) -> String {
+    let items = accounts
+        .iter()
+        .map(|a| ExportAccount {
+            token: a.token.clone(),
+            name: Some(a.name.clone()),
+            phone: a.phone.clone(),
+            refresh_token: a.refresh_token.clone(),
+            expires_at: a.expires_at,
+            base_url: a.base_url.clone(),
+        })
+        .collect();
+    serde_json::to_string_pretty(&ExportWrapper {
+        app: "workbuddy-assistant",
+        kind: "account-export",
+        version: 1,
+        exported_at,
+        accounts: items,
+    })
+    .expect("导出 JSON 序列化不应失败")
+}
+
+/// 解析导出文件（纯函数，便于单测）。容忍三种形态：
+/// 1. 本应用导出的 `{kind:"account-export", accounts:[…]}`
+/// 2. 裸数组 `[… ]`（每条一个账号）
+/// 3. 单个账号对象
+/// 没有 token 或 token 为空的条目直接跳过。
+pub(crate) fn parse_accounts_export(text: &str) -> Result<Vec<ImportItem>, String> {
+    let v: serde_json::Value = serde_json::from_str(text.trim())
+        .map_err(|e| format!("不是有效的 JSON 文件：{e}"))?;
+    let arr = match &v {
+        serde_json::Value::Array(a) => a.clone(),
+        serde_json::Value::Object(o) => match o.get("accounts") {
+            Some(serde_json::Value::Array(a)) => a.clone(),
+            _ => vec![v],
+        },
+        _ => return Err("文件里没有账号数据".into()),
+    };
+    Ok(arr.iter().filter_map(value_to_import_item).collect())
+}
+
+fn value_to_import_item(v: &serde_json::Value) -> Option<ImportItem> {
+    let token = v.get("token")?.as_str()?.trim().to_string();
+    if token.is_empty() {
+        return None;
+    }
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    Some(ImportItem {
+        host: s("base_url").or_else(|| s("host")),
+        name: s("name"),
+        phone: s("phone"),
+        refresh_token: s("refresh_token"),
+        expires_at: v.get("expires_at").and_then(|x| x.as_i64()),
+        token,
+    })
+}
+
+/// 导出全部账号到用户选择的 JSON 文件。文件含登录凭证，落盘后权限收紧为 0600。
+#[tauri::command]
+pub fn export_accounts(app: AppHandle, path: String) -> Result<String, String> {
+    let accounts = accounts::load_accounts(&data_dir(&app));
+    if accounts.is_empty() {
+        return Err("还没有账号可导出".into());
+    }
+    let json = build_export_json(&accounts, &chrono::Local::now().to_rfc3339());
+    let p = PathBuf::from(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    std::fs::write(&p, json).map_err(|e| format!("写入失败：{e}"))?;
+    accounts::set_private_permissions(&p);
+    Ok(path)
+}
+
+/// 从导出文件导入账号：复用 merge_import（按手机号/token 合并，不产生重复）。
+#[tauri::command]
+pub fn import_accounts_file(app: AppHandle, path: String) -> Result<ImportReport, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取失败：{e}"))?;
+    let items = parse_accounts_export(&text)?;
+    if items.is_empty() {
+        return Err("文件里没有可导入的账号（缺少 token 字段？）".into());
+    }
+    let dir = data_dir(&app);
+    let mut accounts = accounts::load_accounts(&dir);
+    let report = merge_import(&mut accounts, items);
+    accounts::save_accounts(&dir, &accounts).map_err(|e| e.to_string())?;
+    Ok(report)
+}
+
 #[cfg(test)]
 mod import_tests {
     use super::*;
@@ -224,6 +343,52 @@ mod import_tests {
             refresh_token: Some("rt-new".into()),
             expires_at: Some(123456),
         }
+    }
+
+    #[test]
+    fn export_json_roundtrips_through_parser() {
+        let accs = vec![
+            acct("waxiloao", Some("19098779775"), "tok-1"),
+            Account {
+                refresh_token: Some("rt-2".into()),
+                expires_at: Some(1777777777000),
+                base_url: Some("https://workbuddy.ai".into()),
+                ..acct("二号", None, "tok-2")
+            },
+        ];
+        let json = build_export_json(&accs, "2026-09-13T00:00:00+08:00");
+        let items = parse_accounts_export(&json).expect("自己的导出必须能解析");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].token, "tok-1");
+        assert_eq!(items[0].phone.as_deref(), Some("19098779775"));
+        // base_url 应映射为 host
+        assert_eq!(items[1].host.as_deref(), Some("https://workbuddy.ai"));
+        assert_eq!(items[1].refresh_token.as_deref(), Some("rt-2"));
+        assert_eq!(items[1].expires_at, Some(1777777777000));
+        // 签到状态不进导出文件
+        assert!(!json.contains("last"));
+    }
+
+    #[test]
+    fn parser_accepts_bare_array_and_single_object() {
+        let items =
+            parse_accounts_export(r#"[{"token":" t1 "},{"token":"t2","host":"https://h"}]"#)
+                .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].token, "t1");
+        assert_eq!(items[1].host.as_deref(), Some("https://h"));
+
+        let one = parse_accounts_export(r#"{"token":"only"}"#).unwrap();
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn parser_skips_entries_without_token_and_rejects_garbage() {
+        let items = parse_accounts_export(r#"[{"name":"没有token"},{"token":""},{"token":"ok"}]"#)
+            .unwrap();
+        assert_eq!(items.len(), 1, "无 token / 空 token 的条目应被跳过");
+        assert!(parse_accounts_export("不是json").is_err());
+        assert!(parse_accounts_export("42").is_err());
     }
 
     #[test]

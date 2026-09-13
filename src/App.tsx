@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type { Account, ImportItem, ImportReport, Settings } from "./types";
 import {
   listAccounts,
   importAccounts,
+  importAccountsFile,
+  exportAccounts,
   removeAccount,
   checkinOne,
   checkinAll,
@@ -255,6 +258,46 @@ export default function App() {
     [load]
   );
 
+  // 导出账号：弹系统保存框选路径，生成可迁移的 JSON（含凭证，提示妥善保管）
+  const runExport = useCallback(async () => {
+    try {
+      const path = await save({
+        title: "导出账号",
+        defaultPath: `workbuddy-accounts-${new Date().toISOString().slice(0, 10)}.json`,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!path) return;
+      await exportAccounts(path);
+      showToast({
+        kind: "ok",
+        text: `已导出到 ${path}（文件含登录凭证，请妥善保管）`,
+      });
+    } catch (e) {
+      showToast({ kind: "err", text: "导出失败：" + String(e) });
+    }
+  }, [showToast]);
+
+  // 导入账号：选导出文件，按手机号/token 合并，跨机器迁移零重复
+  const runImportFile = useCallback(async () => {
+    try {
+      const picked = await open({
+        title: "导入账号",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (typeof picked !== "string") return;
+      const report = await importAccountsFile(picked);
+      await load();
+      showToast({
+        kind: "ok",
+        text: `导入完成：新增 ${report.added}，更新 ${report.updated}`,
+      });
+    } catch (e) {
+      showToast({ kind: "err", text: "导入失败：" + String(e) });
+    }
+  }, [load, showToast]);
+
   const onUpdate = useCallback(async () => {
     await checkAndInstall((p) => {
       setUpdate(p);
@@ -332,6 +375,21 @@ export default function App() {
                   风控间隔 ≤{settings.stagger_max_seconds}s
                 </span>
               )}
+              <button
+                className="btn ghost"
+                disabled={accounts.length === 0}
+                title="把全部账号导出为 JSON（含登录凭证），可在其他机器上导入"
+                onClick={() => void runExport()}
+              >
+                导出
+              </button>
+              <button
+                className="btn ghost"
+                title="从导出的 JSON 文件导入账号（按手机号/token 合并）"
+                onClick={() => void runImportFile()}
+              >
+                导入
+              </button>
               <button
                 className="btn ghost"
                 disabled={busyRefresh || accounts.length === 0}
