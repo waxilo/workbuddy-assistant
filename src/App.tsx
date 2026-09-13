@@ -15,7 +15,7 @@ import {
   saveSettings as saveSettingsApi,
   appVersion,
 } from "./api";
-import { checkAndInstall, type UpdateProgress } from "./updater";
+import { checkAndInstall } from "./updater";
 import { tally, type ConfirmReq, type Toast } from "./common";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TakeoverPage } from "./pages/TakeoverPage";
@@ -64,7 +64,6 @@ export default function App() {
   const [busyRefresh, setBusyRefresh] = useState(false);
   const [modal, setModal] = useState<Modal>(null);
   const [toast, setToast] = useState<Toast>(null);
-  const [update, setUpdate] = useState<UpdateProgress | null>(null);
   const [confirmReq, setConfirmReq] = useState<ConfirmReq | null>(null);
 
   // 自研确认框：不使用 window.confirm —— Tauri 的 WKWebView 未实现原生 confirm 面板，
@@ -298,17 +297,28 @@ export default function App() {
     }
   }, [load, showToast]);
 
-  // 检查更新：结果只走一个通用 toast（顶部）。
-  // update-bar（底部胶囊）只留给「下载中/安装中」这类过程态，
-  // 避免「已是最新版本」同时弹顶部 toast + 底部胶囊两条通知。
+  // 检查更新：所有通知统一走顶部 toast（底部通知条已移除）。
+  // 下载中的进度事件只提示一次，避免刷屏。
   const onUpdate = useCallback(async () => {
+    let downloadShown = false;
     await checkAndInstall((p) => {
-      if (p.status === "no-update" || p.status === "error") {
-        setUpdate(null); // 收起「正在检查更新…」的过程条
-        showToast({ kind: p.status === "error" ? "err" : "info", text: p.message });
+      if (p.status === "checking") return;
+      if (p.status === "downloading") {
+        if (!downloadShown) {
+          downloadShown = true;
+          showToast({ kind: "info", text: p.message });
+        }
         return;
       }
-      setUpdate(p);
+      showToast({
+        kind:
+          p.status === "error"
+            ? "err"
+            : p.status === "no-update"
+            ? "info"
+            : "ok",
+        text: p.message,
+      });
     });
   }, [showToast]);
 
@@ -418,7 +428,7 @@ export default function App() {
           )}
         </header>
 
-        <main className="content">
+        <main className={"content" + (page === "takeover" ? " content-fill" : "")}>
           {page === "accounts" && (
             <AccountsPage
               accounts={accounts}
@@ -474,20 +484,6 @@ export default function App() {
           )}
         </main>
       </div>
-
-      {update && (
-        <div className="update-bar">
-          {update.message}
-          {update.status === "downloading" &&
-            update.total &&
-            update.downloaded != null && (
-              <span className="prog">
-                {" "}
-                {Math.round((update.downloaded / update.total) * 100)}%
-              </span>
-            )}
-        </div>
-      )}
 
       {toast && <div className={`toast toast-${toast.kind}`}>{toast.text}</div>}
 

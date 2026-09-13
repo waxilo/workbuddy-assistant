@@ -32,11 +32,9 @@ function eventKind(e: JournalEvent): {
 }
 
 /**
- * 「无感接管」页（自上而下单列）：
- * 1. 大开关控制接管（开 = 监听本机 + 改 WorkBuddy 端点，会安全重启）；
- * 2. 扣费备选账号：外面只显示「勾选了几个 / 未勾选几个」，点「选择账号」弹框细选；
- *    默认全部勾选（billing 为空 = 全部可用，智能轮换）。
- * 3. 接管动态时间线 —— 开启 / 关闭 / 每个会话开始用哪个账号 / 错误。
+ * 「无感接管」页：顶部一条紧凑控制条（小开关 + 状态 + 扣费账号摘要 + 端口 + 保存），
+ * 下方「接管动态」铺满剩余空间（列表内部滚动，页面不出滚动条）。
+ * 扣费账号默认全部勾选（billing 为空 = 全选，智能轮换），点摘要弹框细选。
  */
 export function TakeoverPage({
   settings,
@@ -66,7 +64,7 @@ export function TakeoverPage({
   /** 实际生效的勾选集：未指定时视为全选 */
   const effective = billing.length === 0 ? allIds : billing;
 
-  /** 刷新接管状态与事件流（15 秒自动轮询，无需手动刷新按钮） */
+  /** 刷新接管状态与事件流（15 秒自动轮询） */
   const refreshStealth = useCallback(async () => {
     try {
       const [s, ev] = await Promise.all([stealthStatus(), takeoverEvents()]);
@@ -172,6 +170,23 @@ export function TakeoverPage({
 
   const live = stealth?.installed && stealth.alive;
 
+  /** 扣费账号摘要（控制条上的那颗胶囊按钮） */
+  const billingSummary =
+    accounts.length === 0
+      ? "暂无账号"
+      : billing.length === 0
+      ? `全部 ${accounts.length} 个（默认）`
+      : `已选 ${billing.length} · 未选 ${accounts.length - billing.length}`;
+
+  /** 状态副文案 */
+  const stateText = live
+    ? "接管生效中，对话正按备选账号扣费"
+    : stealth?.installed
+    ? "状态异常：关闭开关再保存即可恢复直连"
+    : proxyOn
+    ? "保存后生效：会安全重启 WorkBuddy"
+    : "开启后对话自动按备选账号分流扣费";
+
   /**
    * 连续相同（类型 + 内容都一样）的事件聚合为一条，附重复次数。
    * 事件流是「新的在前」，相邻即时间连续——重启风暴、心跳重复这类刷屏只会占一行。
@@ -191,99 +206,59 @@ export function TakeoverPage({
 
   return (
     <section className="panel-page tk-page">
-      {/* ── 接管开关 ── */}
-      <div className={`tk-hero ${live ? "live" : ""}`}>
-        <div className="tk-hero-main">
-          <label className="switch" title="开启后 WorkBuddy 的对话请求将由本地代理分流扣费">
-            <input
-              type="checkbox"
-              checked={proxyOn}
-              onChange={(e) => setProxyOn(e.target.checked)}
-            />
-            <span className="track">
-              <span className="thumb" />
-            </span>
-          </label>
-          <div className="tk-hero-text">
-            <strong>{proxyOn ? "接管已开启" : "接管已关闭"}</strong>
-            <span className="tk-hero-sub">
-              {live
-                ? "WorkBuddy 对话正经过本地代理按备选账号扣费"
-                : proxyOn
-                ? "保存后生效：会安全重启 WorkBuddy 并写入接管端点"
-                : "开启后 WorkBuddy 的对话自动按备选账号分流扣费"}
-            </span>
-          </div>
-        </div>
-        <div className="tk-hero-side">
-          <label className="tk-port">
-            端口
-            <input
-              type="number"
-              value={proxyPort}
-              min={1024}
-              max={65535}
-              onChange={(e) => setProxyPort(e.target.value)}
-            />
-          </label>
-        </div>
-      </div>
-
-      {stealth && (
-        <p
-          className={`stealth-state ${
-            live ? "ok" : stealth.installed ? "bad" : "idle"
-          }`}
-        >
-          <span className="dot" />
-          {live
-            ? "接管生效中"
-            : stealth.installed
-            ? "状态异常：把开关关一下再保存，即可恢复直连"
-            : "尚未装载（应用设置后几秒内生效）"}
-          <span className="stealth-note">{stealth.note}</span>
-        </p>
-      )}
-
-      {/* ── 扣费备选账号（外部只显示摘要，点开弹框细选） ── */}
-      <div className="tk-section">
-        <div className="tk-sec-head">
-          <h3>扣费备选账号</h3>
-          <span className="tk-sec-meta">
-            {billing.length === 0
-              ? `已勾选全部 ${accounts.length} 个（默认，智能轮换）`
-              : accounts.length - billing.length === 0
-              ? `已勾选全部 ${accounts.length} 个`
-              : `已勾选 ${billing.length} 个 · 未勾选 ${
-                  accounts.length - billing.length
-                } 个（不允许扣费）`}
+      {/* ── 紧凑控制条：开关 + 状态 + 扣费账号 + 端口 + 保存 ── */}
+      <div className={`tk-bar ${live ? "live" : ""}`}>
+        <label className="switch" title="开启后 WorkBuddy 的对话请求将由本地代理分流扣费">
+          <input
+            type="checkbox"
+            checked={proxyOn}
+            onChange={(e) => setProxyOn(e.target.checked)}
+          />
+          <span className="track">
+            <span className="thumb" />
           </span>
-          <span className="spacer" />
-          <button className="btn small" onClick={() => setPickerOpen(true)}>
-            选择账号
-          </button>
+        </label>
+        <div className="tk-bar-text" title={stealth?.note}>
+          <strong>{proxyOn ? "接管已开启" : "接管已关闭"}</strong>
+          <span className={`tk-bar-sub ${live ? "ok" : ""}`}>{stateText}</span>
         </div>
-        <p className="hint">
-          只有勾选的账号会被反代用于扣费（会话粘滞 + 积分最早过期优先轮换），未勾选的账号会被排除。
-          端点写入 <code>~/.workbuddy/settings.json</code> 的
-          <code>env.CODEBUDDY_BASE_URL</code>，应用退出或反代停止时会自动摘掉；万一异常，
-          把开关关闭再保存，或走「网络急救 → 一键恢复」，都能一步恢复。
-        </p>
-      </div>
-
-      {err && <p className="form-err">{err}</p>}
-      <div className="page-actions">
-        <button className="btn primary" disabled={busy || !pending} onClick={() => void doSave()}>
+        <span className="spacer" />
+        <button
+          className="tk-accts"
+          title="勾选的账号才允许被扣费，未勾选的会被排除；点击细选"
+          onClick={() => setPickerOpen(true)}
+        >
+          <span className="ta-label">扣费账号</span>
+          <span className="ta-value">{billingSummary}</span>
+          <span className="ta-edit">选择</span>
+        </button>
+        <label className="tk-port">
+          端口
+          <input
+            type="number"
+            value={proxyPort}
+            min={1024}
+            max={65535}
+            onChange={(e) => setProxyPort(e.target.value)}
+          />
+        </label>
+        <button
+          className="btn primary small"
+          disabled={busy || !pending}
+          onClick={() => void doSave()}
+        >
           {busy
             ? "应用中…"
             : proxyOn !== settings.proxy_enabled
-            ? "应用并重启 WorkBuddy"
+            ? "应用并重启"
             : "保存"}
         </button>
       </div>
 
-      {/* ── 接管动态（事件时间线，内部滚动） ── */}
-      <div className="tk-section">
+      {err && <p className="form-err">{err}</p>}
+
+      {/* ── 接管动态：铺满剩余空间，列表内部滚动 ── */}
+      <div className="tk-section tk-feed">
         <div className="tk-sec-head">
           <h3>接管动态</h3>
           <span className="tk-sec-meta">开启 / 关闭 / 每个会话开始用哪个账号 / 异常</span>
@@ -328,7 +303,8 @@ export function TakeoverPage({
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>选择扣费账号</h2>
             <p className="hint">
-              勾选的账号才允许被扣费，未勾选的账号会被排除；默认全部勾选（智能轮换）。
+              勾选的账号才允许被扣费（会话粘滞 + 积分最早过期优先轮换），未勾选的账号会被排除；
+              默认全部勾选（智能轮换）。万一接管异常，把开关关闭再保存，或走「网络急救 → 一键恢复」。
             </p>
             {accounts.length === 0 ? (
               <p className="hint">还没有账号。先到「账号签到」页登录或导入账号。</p>
