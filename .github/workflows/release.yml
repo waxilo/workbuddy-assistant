@@ -45,7 +45,11 @@ jobs:
 
       - name: Build & publish (tauri-action)
         uses: tauri-apps/tauri-action@v0
+        # 2025-09 起 runner 默认强制 Node 24，而 tauri-action@v0 是 Node 20 动作，
+        # 其发布（上传产物）JS 在 Node 24 下会静默崩溃（构建/打包/签名都成功，唯独上传失败）。
+        # 该变量允许 Node 20 动作回退到原生运行时，恢复发布步骤。
         env:
+          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 更新签名私钥（在仓库 Secrets 中配置，见 README）
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
