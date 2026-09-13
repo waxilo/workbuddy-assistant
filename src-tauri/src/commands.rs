@@ -486,7 +486,21 @@ pub async fn refresh_all_credits(app: AppHandle) -> Result<Vec<Account>, String>
         let _ = ensure_fresh_token(&mut accounts[i]).await;
         let host = account_host(&accounts[i]);
         let snap = checkin::fetch_credit_snapshot(&client, &host, &accounts[i].token).await;
-        if let (Some(b), Some(rec)) = (snap.credits, accounts[i].last.as_mut()) {
+        // 新账号还没有签到记录（last 为 None）：刷新积分也要能写进去，
+        // 否则永远停在「余额不展示」。先给一个空记录再回填余额。
+        if let Some(b) = snap.credits {
+            let rec = accounts[i].last.get_or_insert_with(|| accounts::CheckinRecord {
+                success: false,
+                already: false,
+                inactive: false,
+                message: String::new(),
+                credit: None,
+                balance: None,
+                streak: None,
+                host: None,
+                at: String::new(),
+                code: None,
+            });
             rec.balance = Some(b);
         }
     }
