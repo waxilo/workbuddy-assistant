@@ -2,12 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Account, JournalEvent, Settings, StealthStatus } from "../types";
 import {
   applySettings,
-  getSettings,
   takeoverEvents,
   clearTakeoverEvents,
   saveSettings,
   stealthStatus,
-  stealthStop,
 } from "../api";
 import type { ConfirmReq, Toast } from "../common";
 
@@ -34,11 +32,11 @@ function eventKind(e: JournalEvent): {
 }
 
 /**
- * 「无感接管」页。
- *
- * 上：一个大开关控制接管（开 = 监听本机 + 改 WorkBuddy 端点，会安全重启）；
- * 中：扣费备选账号多选 —— 没被勾选的账号不允许扣费，全不勾 = 全部可用；
- * 下：接管动态时间线 —— 开启 / 关闭 / 每个会话开始用哪个账号 / 错误。
+ * 「无感接管」页（自上而下单列）：
+ * 1. 大开关控制接管（开 = 监听本机 + 改 WorkBuddy 端点，会安全重启）；
+ * 2. 扣费备选账号：外面只显示「勾选了几个 / 未勾选几个」，点「选择账号」弹框细选；
+ *    默认全部勾选（billing 为空 = 全部可用，智能轮换）。
+ * 3. 接管动态时间线 —— 开启 / 关闭 / 每个会话开始用哪个账号 / 错误。
  */
 export function TakeoverPage({
   settings,
@@ -50,21 +48,25 @@ export function TakeoverPage({
   settings: Settings;
   accounts: Account[];
   askConfirm: (opts: Omit<ConfirmReq, "resolve">) => Promise<boolean>;
-  /** 保存 / 停止接管后把最新 settings 同步回外层（后端可能已代为改写字段） */
+  /** 保存后把最新 settings 同步回外层（后端可能已代为改写字段） */
   onSettings: (s: Settings) => void;
   onToast: (t: Toast) => void;
 }) {
   const [proxyOn, setProxyOn] = useState(settings.proxy_enabled);
   const [proxyPort, setProxyPort] = useState(String(settings.proxy_port || 8787));
-  // 扣费备选池：勾了谁，谁才有资格被扣费；空 = 全部可用（智能轮换）
+  // 扣费备选池：空 = 默认全部勾选（智能轮换）；非空 = 只有勾选的账号允许扣费
   const [billing, setBilling] = useState<string[]>(settings.billing_account_ids);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [stealth, setStealth] = useState<StealthStatus | null>(null);
   const [events, setEvents] = useState<JournalEvent[]>([]);
-  const [stealthBusy, setStealthBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  /** 刷新接管状态与事件流。接管是后台线程异步装卸的，所以要给用户一个「刷新」。 */
+  const allIds = useMemo(() => accounts.map((a) => a.id), [accounts]);
+  /** 实际生效的勾选集：未指定时视为全选 */
+  const effective = billing.length === 0 ? allIds : billing;
+
+  /** 刷新接管状态与事件流（15 秒自动轮询，无需手动刷新按钮） */
   const refreshStealth = useCallback(async () => {
     try {
       const [s, ev] = await Promise.all([stealthStatus(), takeoverEvents()]);
@@ -82,35 +84,21 @@ export function TakeoverPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /**
-   * 立即停止接管。不弹保存、不等确认字段 —— 后端直接摘端点并把
-   * proxy_enabled=false 落盘（含安全重启），这是「万一出问题我要马上恢复」的按钮。
-   */
-  const doStopStealth = async () => {
+  /** 清空接管动态（不可恢复），清完刷新本地列表 */
+  const doClearEvents = async () => {
     const ok = await askConfirm({
-      title: "立即停止无感接管",
-      body:
-        "会摘除接管端点，并在代理仍可用时重启 WorkBuddy 与长驻 CLI host，随后停止监听。" +
-        "本应用的数据不会受影响，随时可以再开。继续？",
-      okText: "停止接管",
+      title: "清空接管动态",
+      body: "将删除全部接管事件记录（开启/关闭/账号启用/错误），此操作不可恢复。继续？",
+      okText: "清空",
       danger: true,
     });
     if (!ok) return;
-    setStealthBusy(true);
     try {
-      setStealth(await stealthStop());
-      setProxyOn(false); // 后端已落盘，本地开关同步，避免再点保存时状态打架
-      try {
-        onSettings(await getSettings());
-      } catch {
-        /* 外层同步失败不影响停止本身 */
-      }
-      await refreshStealth();
-      onToast({ kind: "ok", text: "已停止接管，WorkBuddy 恢复直连" });
+      await clearTakeoverEvents();
+      setEvents([]);
+      onToast({ kind: "ok", text: "接管动态已清空" });
     } catch (e) {
-      onToast({ kind: "err", text: "停止失败：" + String(e) });
-    } finally {
-      setStealthBusy(false);
+      onToast({ kind: "err", text: "清空失败：" + String(e) });
     }
   };
 
@@ -164,10 +152,18 @@ export function TakeoverPage({
     }
   };
 
+  /**
+   * 弹框里勾/去勾。基准：billing 为空视为「当前全选」，
+   * 勾回全满时归一为空列表（= 默认全选，新增账号也自动可扣费）。
+   */
   const toggleBilling = (id: string) =>
-    setBilling((list) =>
-      list.includes(id) ? list.filter((x) => x !== id) : [...list, id]
-    );
+    setBilling((list) => {
+      const base = list.length === 0 ? allIds : list;
+      const next = base.includes(id)
+        ? base.filter((x) => x !== id)
+        : [...base, id];
+      return next.length === allIds.length && allIds.length > 0 ? [] : next;
+    });
 
   const pending =
     proxyOn !== settings.proxy_enabled ||
@@ -175,24 +171,6 @@ export function TakeoverPage({
     JSON.stringify(billing) !== JSON.stringify(settings.billing_account_ids);
 
   const live = stealth?.installed && stealth.alive;
-
-  /** 清空接管动态（不可恢复），清完刷新本地列表 */
-  const doClearEvents = async () => {
-    const ok = await askConfirm({
-      title: "清空接管动态",
-      body: "将删除全部接管事件记录（开启/关闭/账号启用/错误），此操作不可恢复。继续？",
-      okText: "清空",
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await clearTakeoverEvents();
-      setEvents([]);
-      onToast({ kind: "ok", text: "接管动态已清空" });
-    } catch (e) {
-      onToast({ kind: "err", text: "清空失败：" + String(e) });
-    }
-  };
 
   /**
    * 连续相同（类型 + 内容都一样）的事件聚合为一条，附重复次数。
@@ -213,8 +191,6 @@ export function TakeoverPage({
 
   return (
     <section className="panel-page tk-page">
-      {/* ── 左列：开关 + 扣费账号 + 保存 ── */}
-      <div className="tk-left">
       {/* ── 接管开关 ── */}
       <div className={`tk-hero ${live ? "live" : ""}`}>
         <div className="tk-hero-main">
@@ -250,21 +226,6 @@ export function TakeoverPage({
               onChange={(e) => setProxyPort(e.target.value)}
             />
           </label>
-          <button
-            className="btn small ghost"
-            disabled={stealthBusy}
-            onClick={() => void refreshStealth()}
-          >
-            刷新状态
-          </button>
-          <button
-            className="btn small danger"
-            disabled={stealthBusy || !settings.proxy_enabled}
-            title="立即摘除接管端点并恢复直连（不用走保存）"
-            onClick={() => void doStopStealth()}
-          >
-            立即停止接管
-          </button>
         </div>
       </div>
 
@@ -278,69 +239,35 @@ export function TakeoverPage({
           {live
             ? "接管生效中"
             : stealth.installed
-            ? "心跳已停：请点「立即停止接管」"
+            ? "状态异常：把开关关一下再保存，即可恢复直连"
             : "尚未装载（应用设置后几秒内生效）"}
           <span className="stealth-note">{stealth.note}</span>
         </p>
       )}
 
-      {/* ── 扣费备选账号（多选） ── */}
+      {/* ── 扣费备选账号（外部只显示摘要，点开弹框细选） ── */}
       <div className="tk-section">
         <div className="tk-sec-head">
           <h3>扣费备选账号</h3>
           <span className="tk-sec-meta">
             {billing.length === 0
-              ? `未勾选：全部 ${accounts.length} 个账号都可扣费（智能轮换）`
-              : `已选 ${billing.length} 个，未选中的账号不允许扣费`}
+              ? `已勾选全部 ${accounts.length} 个（默认，智能轮换）`
+              : accounts.length - billing.length === 0
+              ? `已勾选全部 ${accounts.length} 个`
+              : `已勾选 ${billing.length} 个 · 未勾选 ${
+                  accounts.length - billing.length
+                } 个（不允许扣费）`}
           </span>
           <span className="spacer" />
-          <button
-            className="btn small ghost"
-            onClick={() => setBilling(accounts.map((a) => a.id))}
-            disabled={accounts.length === 0}
-          >
-            全选
-          </button>
-          <button
-            className="btn small ghost"
-            onClick={() => setBilling([])}
-            disabled={billing.length === 0}
-          >
-            清空
+          <button className="btn small" onClick={() => setPickerOpen(true)}>
+            选择账号
           </button>
         </div>
-        {accounts.length === 0 ? (
-          <p className="hint">还没有账号。先到「账号签到」页登录或导入账号。</p>
-        ) : (
-          <ul className="acct-multi">
-            {accounts.map((a) => (
-              <li
-                key={a.id}
-                className={billing.includes(a.id) ? "picked" : ""}
-                onClick={() => toggleBilling(a.id)}
-              >
-                <input
-                  type="checkbox"
-                  checked={billing.includes(a.id)}
-                  onChange={() => toggleBilling(a.id)}
-                  onClick={(e) => e.stopPropagation()}
-                />
-                <span className="am-name">{a.name}</span>
-                {a.phone && <span className="am-phone">{a.phone}</span>}
-                <span className="am-state">
-                  {billing.length === 0 || billing.includes(a.id)
-                    ? "可扣费"
-                    : "已排除"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
         <p className="hint">
-          反代只在勾选的账号里选号（会话粘滞 + 积分最早过期优先轮换）；把不想消耗的账号留在未选中状态即可。
+          只有勾选的账号会被反代用于扣费（会话粘滞 + 积分最早过期优先轮换），未勾选的账号会被排除。
           端点写入 <code>~/.workbuddy/settings.json</code> 的
           <code>env.CODEBUDDY_BASE_URL</code>，应用退出或反代停止时会自动摘掉；万一异常，
-          「立即停止接管」或「网络急救 → 一键恢复」都能一步恢复。
+          把开关关闭再保存，或走「网络急救 → 一键恢复」，都能一步恢复。
         </p>
       </div>
 
@@ -354,10 +281,9 @@ export function TakeoverPage({
             : "保存"}
         </button>
       </div>
-      </div>
 
-      {/* ── 右列：接管动态（事件时间线，内部滚动） ── */}
-      <div className="tk-section tk-feed">
+      {/* ── 接管动态（事件时间线，内部滚动） ── */}
+      <div className="tk-section">
         <div className="tk-sec-head">
           <h3>接管动态</h3>
           <span className="tk-sec-meta">开启 / 关闭 / 每个会话开始用哪个账号 / 异常</span>
@@ -395,6 +321,52 @@ export function TakeoverPage({
           </ul>
         )}
       </div>
+
+      {/* ── 扣费账号选择弹框 ── */}
+      {pickerOpen && (
+        <div className="modal-mask" onClick={() => setPickerOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>选择扣费账号</h2>
+            <p className="hint">
+              勾选的账号才允许被扣费，未勾选的账号会被排除；默认全部勾选（智能轮换）。
+            </p>
+            {accounts.length === 0 ? (
+              <p className="hint">还没有账号。先到「账号签到」页登录或导入账号。</p>
+            ) : (
+              <ul className="acct-multi">
+                {accounts.map((a) => (
+                  <li
+                    key={a.id}
+                    className={effective.includes(a.id) ? "picked" : ""}
+                    onClick={() => toggleBilling(a.id)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={effective.includes(a.id)}
+                      onChange={() => toggleBilling(a.id)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <span className="am-name">{a.name}</span>
+                    {a.phone && <span className="am-phone">{a.phone}</span>}
+                    <span className="am-state">
+                      {effective.includes(a.id) ? "可扣费" : "已排除"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setBilling([])}>
+                全部勾选
+              </button>
+              <span className="spacer" />
+              <button className="btn primary" onClick={() => setPickerOpen(false)}>
+                完成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

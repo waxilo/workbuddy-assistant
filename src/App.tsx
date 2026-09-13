@@ -418,7 +418,7 @@ export default function App() {
           )}
         </header>
 
-        <main className={"content" + (page === "takeover" ? " content-fill" : "")}>
+        <main className="content">
           {page === "accounts" && (
             <AccountsPage
               accounts={accounts}

@@ -954,43 +954,12 @@ body {
   font-size: 13px;
 }
 
-/* ── 无感接管页 ─────────────────────────────────────────────── */
+/* ── 无感接管页（自上而下单列） ─────────────────────────────── */
 
-/* 接管页内容区撑满可用高度（不触发页面级滚动条），内部各自滚动 */
-.content-fill {
-  display: flex;
-  flex-direction: column;
-}
-
-/* 左右分栏：左 = 开关/扣费账号/保存，右 = 接管动态时间线 */
 .tk-page {
-  flex: 1;
-  min-height: 0;
-  max-width: none;
-  display: grid;
-  grid-template-columns: minmax(0, 11fr) minmax(0, 9fr);
-  gap: 18px;
-  align-items: stretch;
-}
-.tk-left {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  min-width: 0;
-  min-height: 0;
-}
-/* 右列动态流：填满高度，事件列表内部滚动 */
-.tk-feed {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  margin-bottom: 0;
-}
-.tk-feed .evt-list {
-  flex: 1;
-  min-height: 0;
-  max-height: none;
 }
 
 /* 顶部开关卡 */
@@ -1171,7 +1140,7 @@ body {
   background: #eaefff;
 }
 
-/* 接管动态时间线 */
+/* 接管动态时间线（页面下方区块，列表内部滚动，不把页面无限撑高） */
 .evt-list {
   list-style: none;
   margin: 0;
@@ -1179,6 +1148,7 @@ body {
   display: grid;
   gap: 0;
   align-content: start;
+  max-height: 42vh;
   overflow: auto;
 }
 .evt {
