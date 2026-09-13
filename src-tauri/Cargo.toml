@@ -14,7 +14,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon：后台常驻托盘（关闭窗口不退出进程，定时签到/反代持续生效）
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # 开机自启动：定时签到只有应用在跑才可能触发，所以由应用自己注册登录启动项。
