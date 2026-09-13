@@ -38,12 +38,12 @@ export function LogsPage({
   }, [refresh]);
 
   return (
-    <section className="panel-page">
+    <section className="panel-page logs-page">
       <div className="logs-toolbar">
         <label className="filter">
           账号
           <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-            <option value="">全部</option>
+            <option value="">全部账号</option>
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {accountLabel(a.name, a.phone)}
@@ -99,13 +99,17 @@ export function LogsPage({
                     {accountLabel(l.account_name, l.account_phone)}
                   </span>
                 </div>
-                <div className="log-meta">
-                  {l.balance != null && <span>剩余 {formatCredits(l.balance)}</span>}
-                  {l.credit != null && <span>本次 +{l.credit}</span>}
-                </div>
                 {l.message && <div className="log-msg">{l.message}</div>}
               </div>
-              <span className="log-time">{l.at}</span>
+              <div className="log-right">
+                <span className="log-time">{l.at}</span>
+                {l.credit != null && (
+                  <span className="log-credit">+{formatCredits(l.credit)}</span>
+                )}
+                {l.balance != null && (
+                  <span className="log-balance">余 {formatCredits(l.balance)}</span>
+                )}
+              </div>
             </li>
           ))}
         </ul>
