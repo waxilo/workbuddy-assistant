@@ -3,10 +3,65 @@ import type { Settings } from "../types";
 import { setAutostart, getAutostart, testNotify } from "../api";
 import type { Toast } from "../common";
 
+/** 开关控件：复用全局 .switch 样式（与智能接管页一致） */
+function Toggle({
+  checked,
+  disabled,
+  onChange,
+  title,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+  title?: string;
+}) {
+  return (
+    <label className="switch" title={title}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="track">
+        <span className="thumb" />
+      </span>
+    </label>
+  );
+}
+
+/** 一行设置：左侧标题 + 说明，右侧控件 */
+function Row({
+  title,
+  desc,
+  ctrl,
+  sub,
+  bare,
+}: {
+  title: string;
+  desc?: string;
+  ctrl: React.ReactNode;
+  /** 嵌套行：带浅色背景，视觉上从属于上一项开关 */
+  sub?: boolean;
+  /** 展开区内部的行：不显示分隔线 */
+  bare?: boolean;
+}) {
+  return (
+    <div className={`set-row${sub ? " sub" : ""}${bare ? " in-expand" : ""}`}>
+      <div className="set-row-main">
+        <div className="set-row-title">{title}</div>
+        {desc && <div className="set-row-desc">{desc}</div>}
+      </div>
+      <div className="set-row-ctrl">{ctrl}</div>
+    </div>
+  );
+}
+
 /**
  * 「设置」页：定时签到 / 通知 / 风控 / 自启动等常规配置。
  *
- * 网络急救与智能接管都已是独立页面，这里不再混排；
+ * 卡片式分组布局：每个主题一张卡，每条设置左右分栏（左侧标题 + 说明，右侧控件），
+ * 开关统一用 .switch 切换。网络急救与智能接管已独立成页，本页不再混排；
  * 接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
  */
 export function SettingsPage({
@@ -83,156 +138,169 @@ export function SettingsPage({
     }
   };
 
+  const doSave = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await onSave(snapshot());
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
   return (
-    <section className="panel-page">
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={auto}
-          onChange={(e) => setAuto(e.target.checked)}
-        />
-        启动应用时自动签到全部账号
-      </label>
+    <section className="panel-page set-page">
+      <header className="set-head">
+        <h2>设置</h2>
+        <p>定时签到、多账号风控与通知等常规配置。智能接管相关配置请在「智能接管」页调整。</p>
+      </header>
 
-      <h3 className="sec">定时自动签到</h3>
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={schedOn}
-          onChange={(e) => setSchedOn(e.target.checked)}
-        />
-        每天定时自动签到全部账号
-      </label>
-      {schedOn && (
-        <>
-          <div className="opt-col">
-            <label>
-              签到时刻（24 小时制）
-              <input
-                type="time"
-                value={schedTime}
-                onChange={(e) => setSchedTime(e.target.value)}
-              />
-            </label>
+      {/* 签到自动化 */}
+      <div className="set-card">
+        <div className="set-card-head">
+          <div>
+            <div className="set-card-title">签到自动化</div>
+            <div className="set-card-sub">控制账号在何时自动完成签到</div>
           </div>
-          <p className="hint">
-            ⚠️ 定时任务只在<strong>应用运行期间</strong>触发（桌面端退出后没有后台进程可代为执行）。
-            错过时刻后 30 分钟内打开应用会自动补签一次。
-          </p>
-        </>
-      )}
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={autostart === true}
-          disabled={autoBusy || autostart === null}
-          onChange={(e) => void toggleAutostart(e.target.checked)}
-        />
-        开机自启动（登录时自动运行本应用）
-      </label>
-      {autostart === null ? (
-        <p className="hint">未能读取开机自启动状态（该平台可能不支持）。</p>
-      ) : (
-        schedOn &&
-        !autostart && (
-          <p className="hint">
-            建议同时开启「开机自启动」，否则应用不运行时定时签到不会发生。
-          </p>
-        )
-      )}
-
-      <h3 className="sec">多账号风控</h3>
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={staggerOn}
-          onChange={(e) => setStaggerOn(e.target.checked)}
-        />
-        批量签到时账号之间加入随机间隔
-      </label>
-      {staggerOn && (
-        <div className="opt-col">
-          <label>
-            间隔上限（秒）
-            <input
-              type="number"
-              value={staggerMax}
-              min={2}
-              max={600}
-              onChange={(e) => setStaggerMax(e.target.value)}
-            />
-          </label>
         </div>
-      )}
-      <p className="hint">
-        多个账号在同一台电脑上签到属于同一 IP 的批量请求。开启后，每次批量签到会在账号之间随机等待
-        2～上限秒再发下一个，打散请求节奏、降低触发风控的概率；单账号签到不受影响。
-      </p>
+        <div className="set-group">
+          <Row
+            title="启动应用时自动签到"
+            desc="打开应用时自动为全部账号签到一次"
+            ctrl={<Toggle checked={auto} onChange={setAuto} title="启动即签到" />}
+          />
+          <Row
+            title="每天定时签到"
+            desc="在指定时刻为全部账号自动签到"
+            ctrl={<Toggle checked={schedOn} onChange={setSchedOn} />}
+          />
+          {schedOn && (
+            <Row
+              sub
+              title="签到时刻"
+              desc="24 小时制。应用运行期间触发；错过时刻后 30 分钟内打开会自动补签。"
+              ctrl={
+                <input
+                  type="time"
+                  value={schedTime}
+                  onChange={(e) => setSchedTime(e.target.value)}
+                />
+              }
+            />
+          )}
+          <Row
+            title="开机自启动"
+            desc="登录系统时自动运行本应用（操作系统级设置）"
+            ctrl={
+              <Toggle
+                checked={autostart === true}
+                disabled={autoBusy || autostart === null}
+                onChange={(v) => void toggleAutostart(v)}
+              />
+            }
+          />
+          {autostart === null ? (
+            <p className="hint set-foot">未能读取开机自启动状态（该平台可能不支持）。</p>
+          ) : (
+            schedOn &&
+            !autostart && (
+              <p className="hint set-foot warn">
+                建议同时开启「开机自启动」，否则应用不运行时定时签到不会发生。
+              </p>
+            )
+          )}
+        </div>
+      </div>
 
-      <h3 className="sec">签到通知</h3>
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={notifyOn}
-          onChange={(e) => setNotifyOn(e.target.checked)}
-        />
-        开启 webhook 通知
-      </label>
-      {notifyOn && (
-        <>
-          <label className="wide">
-            Webhook 地址
-            <input
-              value={webhook}
-              placeholder="https://…/hook/&lt;key&gt;"
-              onChange={(e) => setWebhook(e.target.value)}
-            />
-          </label>
-          <div className="opt-row">
-            <button
-              className="btn small"
-              disabled={testing || !webhook.trim()}
-              onClick={() => void doTest()}
-            >
-              {testing ? "发送中…" : "测试推送"}
-            </button>
-            <span className="hint inline">点一下会给这个地址发一条测试消息</span>
+      {/* 多账号风控 */}
+      <div className="set-card">
+        <div className="set-card-head">
+          <div>
+            <div className="set-card-title">多账号风控</div>
+            <div className="set-card-sub">批量签到时打散请求节奏，降低触发风控的概率</div>
           </div>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={notifySched}
-              onChange={(e) => setNotifySched(e.target.checked)}
+        </div>
+        <div className="set-group">
+          <Row
+            title="账号间随机间隔"
+            desc="批量签到时，每个账号之间随机等待一段时间再发下一个，避免同 IP 瞬时连发。"
+            ctrl={<Toggle checked={staggerOn} onChange={setStaggerOn} />}
+          />
+          {staggerOn && (
+            <Row
+              sub
+              title="间隔上限"
+              desc="每个账号之间的随机等待不超过该秒数（2～600）。单账号签到不受影响。"
+              ctrl={
+                <>
+                  <input
+                    type="number"
+                    value={staggerMax}
+                    min={2}
+                    max={600}
+                    onChange={(e) => setStaggerMax(e.target.value)}
+                  />
+                  <span className="set-suffix">秒</span>
+                </>
+              }
             />
-            定时签到后推送
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={notifyManual}
-              onChange={(e) => setNotifyManual(e.target.checked)}
-            />
-            手动「全部签到」后推送
-          </label>
-        </>
-      )}
+          )}
+        </div>
+      </div>
+
+      {/* 签到通知 */}
+      <div className="set-card">
+        <div className="set-card-head">
+          <div>
+            <div className="set-card-title">签到通知</div>
+            <div className="set-card-sub">签到结果通过 webhook 推送到你的渠道</div>
+          </div>
+        </div>
+        <div className="set-group">
+          <Row
+            title="开启 webhook 通知"
+            desc="关闭后不再推送任何签到通知"
+            ctrl={<Toggle checked={notifyOn} onChange={setNotifyOn} />}
+          />
+          {notifyOn && (
+            <div className="set-expand">
+              <label className="set-field">
+                推送地址（Webhook）
+                <input
+                  value={webhook}
+                  placeholder="https://…/hook/<key>"
+                  onChange={(e) => setWebhook(e.target.value)}
+                />
+              </label>
+              <div className="opt-row">
+                <button
+                  className="btn small"
+                  disabled={testing || !webhook.trim()}
+                  onClick={() => void doTest()}
+                >
+                  {testing ? "发送中…" : "测试推送"}
+                </button>
+                <span className="hint inline">点一下会给这个地址发一条测试消息</span>
+              </div>
+              <Row
+                bare
+                title="定时签到后推送"
+                ctrl={<Toggle checked={notifySched} onChange={setNotifySched} />}
+              />
+              <Row
+                bare
+                title="手动「全部签到」后推送"
+                ctrl={<Toggle checked={notifyManual} onChange={setNotifyManual} />}
+              />
+            </div>
+          )}
+        </div>
+      </div>
 
       {err && <p className="form-err">{err}</p>}
       <div className="page-actions">
-        <button
-          className="btn primary"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            setErr("");
-            try {
-              await onSave(snapshot());
-            } catch (e) {
-              setErr(String(e));
-              setBusy(false);
-            }
-          }}
-        >
+        <button className="btn primary" disabled={busy} onClick={() => void doSave()}>
           {busy ? "保存中…" : "保存"}
         </button>
       </div>

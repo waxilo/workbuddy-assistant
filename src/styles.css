@@ -1239,3 +1239,138 @@ body {
 .evt-err .e-detail {
   color: var(--err);
 }
+
+/* ── 设置页：卡片式分组布局 ── */
+.set-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.set-head {
+  margin-bottom: 2px;
+}
+.set-head h2 {
+  margin: 0 0 4px;
+  font-size: 19px;
+  font-weight: 600;
+}
+.set-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.set-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.set-card-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.set-card-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.set-card-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.set-group {
+  padding: 6px 18px;
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 0;
+}
+/* 仅相邻同级行之间显示分隔线（嵌套行 / 展开区内部行不显示） */
+.set-group > .set-row ~ .set-row:not(.sub):not(.in-expand) {
+  border-top: 1px solid var(--border);
+}
+/* 从属于上一项开关的嵌套行：浅色背景块 */
+.set-row.sub {
+  background: var(--panel-2);
+  border-radius: 10px;
+  padding: 13px 14px;
+  margin: 0 -4px;
+}
+.set-row-main {
+  min-width: 0;
+}
+.set-row-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+.set-row-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+  line-height: 1.55;
+  max-width: 480px;
+}
+.set-row-ctrl {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 防止全局 `.panel-page label { display:block; margin-bottom }` 把开关拉成整行 */
+.set-row-ctrl .switch {
+  display: inline-block;
+  margin: 0;
+}
+.set-row-ctrl input[type="time"],
+.set-row-ctrl input[type="number"] {
+  width: auto;
+  min-width: 96px;
+}
+.set-suffix {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 开关展开后的子区域：浅色底，与上方开关分隔，左右贴卡片边 */
+.set-expand {
+  margin: 8px -18px 0;
+  padding: 14px 18px 4px;
+  border-top: 1px dashed var(--border);
+  background: var(--panel-2);
+  border-radius: 0 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.set-expand .set-row {
+  padding: 6px 0;
+}
+.set-field {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0;
+}
+.set-field input {
+  width: 100%;
+  margin-top: 6px;
+}
+/* 卡片内的提示语：去掉全局 .hint 的负边距，改用卡片内合适的间距 */
+.set-foot {
+  margin: 10px 0 0;
+}
+.set-foot.warn {
+  color: var(--warn);
+}
