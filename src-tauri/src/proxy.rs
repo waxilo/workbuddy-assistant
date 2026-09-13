@@ -12,9 +12,10 @@
 //!    换账号会丢上下文，必须粘住。新会话（粘滞过期或首次）才重新选。
 //! 2. **选账号**：谁的「还有余量的资源包」最早过期就用谁——把快过期的积分先消耗掉；
 //!    查不到过期时间的账号排最后，剩余积分为 0 的账号直接跳过（除非全员为 0）。
-//! 3. **限流无感切换**：免费模型（按请求体 `model` 前缀识别，目前仅 Hy3）触发限流（429）
-//!    时，把该账号打入 10 分钟冷却、解绑会话粘滞，换下一个账号重发同一请求（上限 2 次
-//!    切换）；冷却中的账号路由优先跳过。付费模型的 429 原样透传。
+//! 3. **限流无感切换**：免费模型（从网关 `/v2/enterprises/personal/models` 动态拉取
+//!    积分倍率，倍率为 0 即免费；1h 缓存，失败兜底 hy3）触发限流（429）时，把该账号
+//!    打入 10 分钟冷却、解绑会话粘滞，换下一个账号重发同一请求（上限 2 次切换）；
+//!    冷却中的账号路由优先跳过。付费模型的 429 原样透传。
 //! 4. **续签兜底**：选中的账号若凭证临近过期（<48h）会先自动续签。
 //! 5. **转发**：路径与查询串原样保留，替换 `Authorization` 为选中账号的 token，
 //!    去掉逐跳头（Host / Content-Length 等）后透传其余请求头。
@@ -30,7 +31,7 @@ use crate::accounts;
 use crate::checkin::fetch_credit_snapshot;
 use crate::commands;
 use crate::stealth;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -419,8 +420,15 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
             r.send().await
         });
 
+        // 免费模型集（动态拉取、1h 缓存；拿不到用内置兜底）
+        let free_set = if is_chat {
+            ensure_free_models(&host, &account.token)
+        } else {
+            HashSet::new()
+        };
+
         match upstream {
-            Ok(resp) if is_chat && is_free_model(model.as_deref()) && resp.status() == 429 => {
+            Ok(resp) if is_chat && is_free_model(model.as_deref(), &free_set) && resp.status() == 429 => {
                 // 限流账号冷却 + 会话解绑：同一会话的下一次请求也会自动绕开它
                 if let Ok(mut m) = cooldown().lock() {
                     m.insert(account.id.clone(), Instant::now());
@@ -514,12 +522,79 @@ fn body_model(body: &[u8]) -> Option<String> {
         .and_then(|v| v.get("model").and_then(|m| m.as_str().map(str::to_string)))
 }
 
-/// 免费模型判定：目前已知 Hy3（前缀匹配、忽略大小写，覆盖 Hy3-xxx 之类变体）。
-/// 免费模型不扣积分但有隐藏限流，429 值得换号重试；付费模型的 429 与积分相关，透传。
-fn is_free_model(model: Option<&str>) -> bool {
-    model
-        .map(|m| m.to_ascii_lowercase().starts_with("hy3"))
-        .unwrap_or(false)
+/// 免费模型判定：不再写死模型名，从网关 `GET /v2/enterprises/personal/models`
+/// 动态拉取每个模型的积分倍率（`credits` 字段，如 "x0.00 credits"/"x0.05"），
+/// 倍率为 0 即免费。缓存 1 小时；拉取失败退回内置兜底（官方目录里 hy3 为
+/// x0.00，而 hy3-x 是 x0.05 **不免费**——所以绝不能用 `hy3` 前缀匹配）。
+const FREE_MODELS_TTL: Duration = Duration::from_secs(3600);
+const FALLBACK_FREE_MODELS: [&str; 1] = ["hy3"];
+
+/// 解析倍率字符串："x0.00 credits" / "x0.05" / "x0.79 credits" → 数字
+fn parse_multiplier(s: &str) -> Option<f64> {
+    s.trim()
+        .trim_start_matches('x')
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// 从 models 接口响应里提取免费模型 id 集（纯函数，便于单测）
+fn free_ids_from_value(v: &serde_json::Value) -> Option<HashSet<String>> {
+    let arr = v.get("data")?.get("models")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|m| {
+                let id = m.get("id")?.as_str()?.to_string();
+                let mult = m.get("credits")?.as_str().and_then(parse_multiplier)?;
+                (mult == 0.0).then_some(id)
+            })
+            .collect(),
+    )
+}
+
+/// 免费模型集缓存：(拉取成功时刻, 模型 id 集)
+fn free_models_cache() -> &'static Mutex<Option<(Instant, HashSet<String>)>> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, HashSet<String>)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// 拉取免费模型集（网络）。失败返回 None，调用方用兜底。
+async fn fetch_free_models(host: &str, token: &str) -> Option<HashSet<String>> {
+    let url = format!(
+        "{}/v2/enterprises/personal/models",
+        host.trim_end_matches('/')
+    );
+    let resp = CLIENT.get(&url).bearer_auth(token).send().await.ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    free_ids_from_value(&v)
+}
+
+/// 惰性获取免费模型集：缓存有效直接用；过期则用当前账号 token 拉一次；
+/// 拉取失败用内置兜底（并保留旧缓存，避免每次请求都重试打接口）。
+fn ensure_free_models(host: &str, token: &str) -> HashSet<String> {
+    if let Ok(guard) = free_models_cache().lock() {
+        if let Some((at, set)) = guard.as_ref() {
+            if at.elapsed() < FREE_MODELS_TTL {
+                return set.clone();
+            }
+        }
+    }
+    let fresh = tauri::async_runtime::block_on(fetch_free_models(host, token));
+    match fresh {
+        Some(set) if !set.is_empty() => {
+            if let Ok(mut g) = free_models_cache().lock() {
+                *g = Some((Instant::now(), set.clone()));
+            }
+            set
+        }
+        _ => FALLBACK_FREE_MODELS.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// 免费判定：精确匹配动态集合
+fn is_free_model(model: Option<&str>, free: &HashSet<String>) -> bool {
+    model.is_some_and(|m| free.contains(m))
 }
 
 /// 不该回给客户端的响应头（逐跳的，或 reqwest 已代劳解压后失效的）
@@ -968,15 +1043,31 @@ mod tests {
         // 请求体缺 model / 非法 JSON → 视为未知，不触发切换
         assert_eq!(body_model(b"{}"), None);
         assert_eq!(body_model(b"not json"), None);
-        assert_eq!(body_model(br#"{"model":"Hy3"}"#).as_deref(), Some("Hy3"));
-        // Hy3 及其变体（忽略大小写）算免费模型
-        assert!(is_free_model(Some("Hy3")));
-        assert!(is_free_model(Some("hy3-20260101")));
-        assert!(is_free_model(Some("HY3Pro")));
-        // 未知 / 其它模型不算
-        assert!(!is_free_model(None));
-        assert!(!is_free_model(Some("claude-sonnet-4")));
-        assert!(!is_free_model(Some("gpt-5")));
+        assert_eq!(body_model(br#"{"model":"hy3"}"#).as_deref(), Some("hy3"));
+
+        // 倍率解析：格式不统一（带/不带 "credits" 后缀）都要兼容
+        assert_eq!(parse_multiplier("x0.00 credits"), Some(0.0));
+        assert_eq!(parse_multiplier("x0.05"), Some(0.05));
+        assert_eq!(parse_multiplier(" x0.79 credits "), Some(0.79));
+        assert_eq!(parse_multiplier("credits"), None);
+
+        // 从接口响应提取免费模型集：倍率 0 才算，缺 credits 字段的不算
+        let sample = serde_json::json!({"data":{"models":[
+            {"id":"hy3","credits":"x0.00 credits"},
+            {"id":"hy3-x","credits":"x0.05"},
+            {"id":"auto"},
+            {"id":"glm-5.1","credits":"x0.79 credits"}
+        ]}});
+        let set = free_ids_from_value(&sample).unwrap();
+        assert!(set.contains("hy3"));
+        assert!(!set.contains("hy3-x"), "hy3-x 倍率 x0.05，不是免费模型");
+        assert!(!set.contains("auto"));
+        assert!(!set.contains("glm-5.1"));
+
+        // 判定走精确匹配
+        assert!(is_free_model(Some("hy3"), &set));
+        assert!(!is_free_model(Some("hy3-x"), &set));
+        assert!(!is_free_model(None, &set));
     }
 
     #[test]
