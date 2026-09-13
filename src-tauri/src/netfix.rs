@@ -342,20 +342,27 @@ pub fn diagnose(home: &Path, data_dir: &Path) -> NetReport {
     }
     scanned.push("shell 启动脚本（.zshrc / .zprofile / .bash_profile 等）".into());
 
-    // 4) 本应用反代：开着不是故障，但「一键恢复」会顺带关掉，先说清楚
+    // 4) 本应用反代：开着不是故障，但「一键恢复」会顺带关掉，先说清楚。
+    //    如果上面已识别为「智能接管 / 正常」（活的接管），这里不再单列一条，
+    //    否则用户会以为有两个东西在跑。只在没有识别到活的接管时（异常状态）才报出来。
     let settings = crate::accounts::load_settings(data_dir);
     if settings.proxy_enabled {
-        let port = settings.proxy_port;
-        issues.push(NetIssue {
-            id: "app:proxy".into(),
-            scope: "本应用反代".into(),
-            target: "本地反代开关".into(),
-            value: format!("已开启，监听 127.0.0.1:{port}"),
-            level: "warn".into(),
-            note: "反代本身不会导致 WorkBuddy 断网。若你正在排查「网络不通」，建议一并关掉以排除干扰。"
-                .into(),
-            fixable: true,
-        });
+        let alive_takeover = issues
+            .iter()
+            .any(|i| i.scope == "智能接管" && i.level == "ok");
+        if !alive_takeover {
+            let port = settings.proxy_port;
+            issues.push(NetIssue {
+                id: "app:proxy".into(),
+                scope: "本应用反代".into(),
+                target: "本地反代开关".into(),
+                value: format!("已开启，监听 127.0.0.1:{port}"),
+                level: "warn".into(),
+                note: "反代本身不会导致 WorkBuddy 断网。若你正在排查「网络不通」，建议一并关掉以排除干扰。"
+                    .into(),
+                fixable: true,
+            });
+        }
     }
 
     // 5) 长驻 CLI host 是否使用过随后被摘除的接管端点。
