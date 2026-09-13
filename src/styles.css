@@ -293,6 +293,10 @@ body {
   padding: 7px 12px;
   font-size: 12.5px;
 }
+.btn.small {
+  padding: 7px 12px;
+  font-size: 12.5px;
+}
 .btn.block {
   width: 100%;
 }
@@ -346,21 +350,27 @@ body {
   max-width: none;
   margin: 0;
 }
-/* 页面底部操作区（保存等） */
-.page-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 18px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
 .empty {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.7;
   text-align: center;
   margin-top: 60px;
+}
+.empty.log-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 80px;
+}
+.empty.log-empty svg {
+  color: #c2c8d4;
+}
+.empty.log-empty .empty-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+  max-width: 280px;
 }
 
 /* 账号页：轻量统计概览（不抢内容、不撑高） */
@@ -851,17 +861,20 @@ body {
   max-height: 30vh;
   overflow: auto;
 }
-/* 左侧色条区分严重度：红=会断网，橙=残留 */
+/* 列表项作为卡片内行：去掉外边框/圆角，改用极浅分隔线 + 左侧严重度色条 */
 .net-item {
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: var(--panel);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  padding: 12px 0 12px 12px;
+  background: transparent;
+}
+.net-item:last-child {
+  border-bottom: none;
 }
 .net-item.block {
   border-left-color: var(--err);
-  background: #fffafa;
 }
 .net-item.warn {
   border-left-color: var(--warn);
@@ -928,6 +941,73 @@ body {
   flex-wrap: wrap;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* 网络急救页：整体状态 Banner + 卡片容器 */
+.netfix-intro {
+  margin-bottom: 14px;
+}
+.status-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 15px;
+  border-radius: 10px;
+  margin-bottom: 12px;
+}
+.status-banner svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+.status-banner.ok {
+  background: rgba(46, 163, 107, 0.1);
+  border: 1px solid rgba(46, 163, 107, 0.25);
+}
+.status-banner.ok svg {
+  color: var(--ok);
+}
+.status-banner.ok strong {
+  color: var(--ok);
+}
+.status-banner.warn {
+  background: rgba(201, 138, 43, 0.1);
+  border: 1px solid rgba(201, 138, 43, 0.25);
+}
+.status-banner.warn svg {
+  color: var(--warn);
+}
+.status-banner.warn strong {
+  color: var(--warn);
+}
+.status-banner strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.status-banner span {
+  display: block;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.net-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px 16px;
+  margin-bottom: 12px;
+}
+.net-card .net-list {
+  max-height: none;
+}
+.net-steps-title {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 14px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
 }
 /* 文本按钮（备份文件用它在 Finder 里定位） */
 .link-btn {
@@ -1310,23 +1390,6 @@ body {
   max-height: none;
 }
 
-/* 接管动态顶部的实时扣费备选池状态（与下面的历史事件区分） */
-.tk-pool {
-  margin: 0 0 8px;
-  padding: 7px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--muted);
-  background: rgba(59, 108, 255, 0.08);
-  border: 1px solid rgba(59, 108, 255, 0.2);
-}
-.tk-pool b {
-  color: var(--primary);
-  font-size: 13px;
-  margin: 0 1px;
-}
-
 /* 拨动开关 */
 .switch {
   position: relative;
@@ -1578,19 +1641,19 @@ body {
   flex-direction: column;
   gap: 16px;
 }
-.set-head {
-  margin-bottom: 2px;
-}
-.set-head h2 {
-  margin: 0 0 4px;
-  font-size: 19px;
-  font-weight: 600;
-}
-.set-head p {
-  margin: 0;
+.set-intro {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 2px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
+}
+.set-intro svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+  opacity: 0.7;
 }
 
 .set-card {
@@ -1598,18 +1661,28 @@ body {
   align-items: stretch;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: var(--shadow);
 }
 .set-card-head {
-  flex: 0 0 180px;
+  flex: 0 0 200px;
   display: flex;
-  flex-direction: column;
-  justify-content: flex-start;
-  padding: 18px;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 16px 18px 18px;
   border-right: 1px solid var(--border);
-  background: var(--panel-2);
+  background: var(--panel);
+}
+.set-card-icon {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: rgba(59, 108, 255, 0.1);
+  color: var(--primary);
+  margin-top: 1px;
 }
 .set-card-title {
   font-size: 14px;
@@ -1709,5 +1782,44 @@ body {
   margin: 10px 0 0;
 }
 .set-foot.warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: var(--warn);
+  background: rgba(201, 138, 43, 0.1);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.set-foot.warn svg {
+  flex: 0 0 auto;
+}
+
+/* 设置页底部自动保存状态：无按钮，纯提示 */
+.set-autosave {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 12px 18px;
+  font-size: 13px;
+  color: var(--ok, #1a7f55);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.set-autosave .muted {
+  color: var(--muted);
+}
+.set-autosave svg {
+  flex: 0 0 auto;
+}
+/* 保存中的小圆点，转圈（复用全局 .spin 动画） */
+.spin-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--muted);
+  border-top-color: transparent;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
 }

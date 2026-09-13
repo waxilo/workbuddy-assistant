@@ -341,14 +341,12 @@ export default function App() {
     });
   }, [showToast]);
 
-  const saveSettings = useCallback(
-    async (s: Settings) => {
-      const saved = await saveSettingsApi(s);
-      setSettings(saved);
-      showToast({ kind: "ok", text: "设置已保存" });
-    },
-    [showToast]
-  );
+  const saveSettings = useCallback(async (s: Settings) => {
+    // 设置页已改为「改动自动保存」，这里只负责落盘并刷新内存中的 settings，
+    // 不再弹成功 toast（每次改动都弹会刷屏）。失败提示由设置页兜底。
+    const saved = await saveSettingsApi(s);
+    setSettings(saved);
+  }, []);
 
   return (
     <div className="app">

@@ -117,3 +117,79 @@ export const IconUser = (p: IconProps) => (
     <circle cx="12" cy="7" r="4" />
   </Svg>
 );
+
+export const IconCalendar = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="18" rx="2" />
+    <path d="M16 2v4M8 2v4M3 10h18" />
+  </Svg>
+);
+
+export const IconClock = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </Svg>
+);
+
+export const IconPower = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 2v10" />
+    <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+  </Svg>
+);
+
+export const IconShield = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    <path d="M9 12l2 2 4-4" />
+  </Svg>
+);
+
+export const IconBell = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+    <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+  </Svg>
+);
+
+export const IconWrench = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M22 11.08V12a8.91 8.91 0 0 1-9.91 9 8.84 8.84 0 0 1-4-1l-3 3a1 1 0 0 1-1.41-1.41l3-3a8.84 8.84 0 0 1-1-4A8.91 8.91 0 0 1 12 3h.92a8 8 0 0 1 6 2.92l1.41-1.41a1 1 0 0 1 1.41 1.41l-1.41 1.41A8 8 0 0 1 22 11.08z" />
+  </Svg>
+);
+
+export const IconPlug = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 2v6M15 2v6" />
+    <path d="M6 8h12v3a6 6 0 0 1-12 0z" />
+    <path d="M12 17v5" />
+  </Svg>
+);
+
+export const IconAlertTriangle = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+    <path d="M12 9v4M12 17h.01" />
+  </Svg>
+);
+
+export const IconCircleCheck = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+    <path d="M22 4 12 14.01l-3-3" />
+  </Svg>
+);
+
+export const IconBolt = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+  </Svg>
+);
+
+export const IconInfo = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4M12 8h.01" />
+  </Svg>
+);

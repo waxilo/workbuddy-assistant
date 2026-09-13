@@ -3,6 +3,7 @@ import type { NetReport, NetStep } from "../types";
 import { netDiagnose, netRestore, revealPath } from "../api";
 import { baseName } from "../common";
 import type { ConfirmReq, Toast } from "../common";
+import { IconWrench, IconAlertTriangle, IconCircleCheck } from "../components/Icons";
 
 /**
  * 「网络急救」页：从设置里独立出来——它排查的是 WorkBuddy 全局网络配置，
@@ -75,8 +76,8 @@ export function NetfixPage({
   }, []);
 
   return (
-    <section className="panel-page">
-      <p className="hint">
+    <section className="panel-page netfix-page">
+      <p className="hint netfix-intro">
         调试「自定义服务端点」时，如果把地址写进了 WorkBuddy 的
         <strong>全局</strong>配置（<code>~/.workbuddy/settings.json</code> 的 <code>env</code>，
         或 launchd 全局环境变量），受影响的会是<strong>整个 WorkBuddy</strong>（含正在运行的桌面端），
@@ -88,52 +89,78 @@ export function NetfixPage({
           disabled={netBusy !== null}
           onClick={() => void doDiagnose()}
         >
-          {netBusy === "diag" ? "扫描中…" : "重新诊断"}
+          {netBusy === "diag" ? (
+            <>
+              <IconWrench size={15} className="spin" />
+              扫描中…
+            </>
+          ) : (
+            <>
+              <IconWrench size={15} />
+              重新诊断
+            </>
+          )}
         </button>
         <button
           className="btn small danger"
           disabled={netBusy !== null}
           onClick={() => void doRestore()}
         >
+          <IconAlertTriangle size={15} />
           {netBusy === "restore" ? "恢复中…" : "一键恢复（含关闭反代）"}
         </button>
       </div>
 
       {netReport &&
         (netReport.healthy && netReport.issues.length === 0 ? (
-          <p className="net-ok">✓ 未发现残留端点配置，WorkBuddy 的网络链路是干净的。</p>
+          <div className="status-banner ok">
+            <IconCircleCheck size={18} />
+            <div>
+              <strong>网络链路正常</strong>
+              <span>未发现残留端点配置，WorkBuddy 的网络链路是干净的。</span>
+            </div>
+          </div>
         ) : (
           <>
-            <ul className="net-list">
-              {netReport.issues.map((it) => (
-                <li key={it.id} className={`net-item ${it.level}`}>
-                  <div className="net-head">
-                    <span
-                      className={`badge ${
-                        it.level === "block"
-                          ? "badge-err"
+            <div className="status-banner warn">
+              <IconAlertTriangle size={18} />
+              <div>
+                <strong>发现 {netReport.issues.length} 项配置残留</strong>
+                <span>以下项可能影响 WorkBuddy 网络连接，建议点「一键恢复」清除。</span>
+              </div>
+            </div>
+            <div className="card net-card">
+              <ul className="net-list">
+                {netReport.issues.map((it) => (
+                  <li key={it.id} className={`net-item ${it.level}`}>
+                    <div className="net-head">
+                      <span
+                        className={`badge ${
+                          it.level === "block"
+                            ? "badge-err"
+                            : it.level === "ok"
+                            ? "badge-ok"
+                            : "badge-already"
+                        }`}
+                      >
+                        {it.level === "block"
+                          ? "会断网"
                           : it.level === "ok"
-                          ? "badge-ok"
-                          : "badge-already"
-                      }`}
-                    >
-                      {it.level === "block"
-                        ? "会断网"
-                        : it.level === "ok"
-                        ? "正常"
-                        : "残留"}
-                    </span>
-                    <span className="net-scope">{it.scope}</span>
-                    <span className="net-target">{it.target}</span>
-                  </div>
-                  <div className="net-value">{it.value}</div>
-                  <div className="net-note">
-                    {it.note}
-                    {!it.fixable && "（此项只报告，需要你手动处理）"}
-                  </div>
-                </li>
-              ))}
-            </ul>
+                          ? "正常"
+                          : "残留"}
+                      </span>
+                      <span className="net-scope">{it.scope}</span>
+                      <span className="net-target">{it.target}</span>
+                    </div>
+                    <div className="net-value">{it.value}</div>
+                    <div className="net-note">
+                      {it.note}
+                      {!it.fixable && "（此项只报告，需要你手动处理）"}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
             {netReport.issues.some((i) => i.fixable && i.level !== "ok") && (
               <p className="hint">
                 「一键恢复」会清除上表中标记为可自动处理的项；改动前一律先备份。
@@ -143,7 +170,8 @@ export function NetfixPage({
         ))}
 
       {netSteps && (
-        <>
+        <div className="card net-card">
+          <div className="net-steps-title">恢复详情</div>
           <ul className="net-steps">
             {netSteps.map((s, i) => (
               <li key={`${i}-${s.action}`} className={`net-step ${s.ok ? "ok" : "bad"}`}>
@@ -173,7 +201,7 @@ export function NetfixPage({
               ))}
             </div>
           )}
-        </>
+        </div>
       )}
     </section>
   );

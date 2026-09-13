@@ -1,7 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Settings } from "../types";
 import { setAutostart, getAutostart, testNotify } from "../api";
 import type { Toast } from "../common";
+import {
+  IconCalendar,
+  IconShield,
+  IconBell,
+  IconCheck,
+  IconAlertTriangle,
+  IconInfo,
+} from "../components/Icons";
 
 /** 开关控件：复用全局 .switch 样式（与智能接管页一致） */
 function Toggle({
@@ -84,11 +92,17 @@ export function SettingsPage({
   const [staggerOn, setStaggerOn] = useState(settings.stagger_checkin);
   const [staggerMax, setStaggerMax] = useState(String(settings.stagger_max_seconds));
   const [testing, setTesting] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [err, setErr] = useState("");
   // 开机自启动是「操作系统状态」，不属于 settings.json，改一次立即生效
   const [autostart, setAutostartOn] = useState<boolean | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
+
+  // 当前草稿：含其它页托管的字段（proxy_* / billing_account_ids 等），原样透传，
+  // 每次改动都基于它合并后自动保存，避免覆盖「智能接管」页改过的值。
+  const draftRef = useRef<Settings>({ ...settings });
+  const saveTimer = useRef<number | null>(null);
 
   useEffect(() => {
     getAutostart()
@@ -110,21 +124,27 @@ export function SettingsPage({
     }
   };
 
-  // 默认 Base URL 是内置常量，界面不提供修改入口（改错会让签到打到错误的域）；
-  // 接管相关字段本页没有编辑权，原样透传（它们归「智能接管」页管）
-  const snapshot = (): Settings => ({
-    ...settings,
-    auto_checkin_on_start: auto,
-    schedule_enabled: schedOn,
-    // <input type="time"> 已产出 HH:MM；后端还会再规范化一次
-    schedule_time: schedTime.trim(),
-    notify_enabled: notifyOn,
-    notify_webhook: webhook.trim(),
-    notify_on_schedule: notifySched,
-    notify_on_manual: notifyManual,
-    stagger_checkin: staggerOn,
-    stagger_max_seconds: Number(staggerMax) || 45,
-  });
+  // 合并改动并自动保存：防抖 400ms，避免连打字符反复写盘；
+  // 任何一项改动都即时落盘，无需「保存」按钮。
+  const patch = (updates: Partial<Settings>) => {
+    const next = { ...draftRef.current, ...updates };
+    draftRef.current = next;
+    setSaved(false);
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(async () => {
+      setSaving(true);
+      try {
+        await onSave(next);
+        setErr("");
+        setSaved(true);
+      } catch (e) {
+        setErr(String(e));
+      } finally {
+        setSaving(false);
+        saveTimer.current = null;
+      }
+    }, 400);
+  };
 
   const doTest = async () => {
     setTesting(true);
@@ -138,27 +158,19 @@ export function SettingsPage({
     }
   };
 
-  const doSave = async () => {
-    setBusy(true);
-    setErr("");
-    try {
-      await onSave(snapshot());
-    } catch (e) {
-      setErr(String(e));
-      setBusy(false);
-    }
-  };
-
   return (
     <section className="panel-page set-page">
-      <header className="set-head">
-        <h2>设置</h2>
-        <p>定时签到、多账号风控与通知等常规配置。智能接管相关配置请在「智能接管」页调整。</p>
-      </header>
+      <p className="set-intro">
+        <IconInfo size={14} />
+        定时签到、多账号风控与通知等常规配置。智能接管相关配置请在「智能接管」页调整。
+      </p>
 
       {/* 签到自动化 */}
       <div className="set-card">
         <div className="set-card-head">
+          <span className="set-card-icon">
+            <IconCalendar size={20} />
+          </span>
           <div>
             <div className="set-card-title">签到自动化</div>
             <div className="set-card-sub">控制账号在何时自动完成签到</div>
@@ -168,12 +180,29 @@ export function SettingsPage({
           <Row
             title="启动应用时自动签到"
             desc="打开应用时自动为全部账号签到一次"
-            ctrl={<Toggle checked={auto} onChange={setAuto} title="启动即签到" />}
+            ctrl={
+              <Toggle
+                checked={auto}
+                onChange={(v) => {
+                  setAuto(v);
+                  patch({ auto_checkin_on_start: v });
+                }}
+                title="启动即签到"
+              />
+            }
           />
           <Row
             title="每天定时签到"
             desc="在指定时刻为全部账号自动签到"
-            ctrl={<Toggle checked={schedOn} onChange={setSchedOn} />}
+            ctrl={
+              <Toggle
+                checked={schedOn}
+                onChange={(v) => {
+                  setSchedOn(v);
+                  patch({ schedule_enabled: v });
+                }}
+              />
+            }
           />
           {schedOn && (
             <Row
@@ -184,7 +213,11 @@ export function SettingsPage({
                 <input
                   type="time"
                   value={schedTime}
-                  onChange={(e) => setSchedTime(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSchedTime(v);
+                    patch({ schedule_time: v.trim() });
+                  }}
                 />
               }
             />
@@ -206,6 +239,7 @@ export function SettingsPage({
             schedOn &&
             !autostart && (
               <p className="hint set-foot warn">
+                <IconAlertTriangle size={13} />
                 建议同时开启「开机自启动」，否则应用不运行时定时签到不会发生。
               </p>
             )
@@ -216,6 +250,9 @@ export function SettingsPage({
       {/* 多账号风控 */}
       <div className="set-card">
         <div className="set-card-head">
+          <span className="set-card-icon">
+            <IconShield size={20} />
+          </span>
           <div>
             <div className="set-card-title">多账号风控</div>
             <div className="set-card-sub">批量签到时打散请求节奏，降低触发风控的概率</div>
@@ -225,7 +262,15 @@ export function SettingsPage({
           <Row
             title="账号间随机间隔"
             desc="批量签到时，每个账号之间随机等待一段时间再发下一个，避免同 IP 瞬时连发。"
-            ctrl={<Toggle checked={staggerOn} onChange={setStaggerOn} />}
+            ctrl={
+              <Toggle
+                checked={staggerOn}
+                onChange={(v) => {
+                  setStaggerOn(v);
+                  patch({ stagger_checkin: v });
+                }}
+              />
+            }
           />
           {staggerOn && (
             <Row
@@ -239,7 +284,11 @@ export function SettingsPage({
                     value={staggerMax}
                     min={2}
                     max={600}
-                    onChange={(e) => setStaggerMax(e.target.value)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setStaggerMax(v);
+                      patch({ stagger_max_seconds: Number(v) || 45 });
+                    }}
                   />
                   <span className="set-suffix">秒</span>
                 </>
@@ -252,6 +301,9 @@ export function SettingsPage({
       {/* 签到通知 */}
       <div className="set-card">
         <div className="set-card-head">
+          <span className="set-card-icon">
+            <IconBell size={20} />
+          </span>
           <div>
             <div className="set-card-title">签到通知</div>
             <div className="set-card-sub">签到结果通过 webhook 推送到你的渠道</div>
@@ -261,7 +313,15 @@ export function SettingsPage({
           <Row
             title="开启 webhook 通知"
             desc="关闭后不再推送任何签到通知"
-            ctrl={<Toggle checked={notifyOn} onChange={setNotifyOn} />}
+            ctrl={
+              <Toggle
+                checked={notifyOn}
+                onChange={(v) => {
+                  setNotifyOn(v);
+                  patch({ notify_enabled: v });
+                }}
+              />
+            }
           />
           {notifyOn && (
             <div className="set-expand">
@@ -270,7 +330,11 @@ export function SettingsPage({
                 <input
                   value={webhook}
                   placeholder="https://…/hook/<key>"
-                  onChange={(e) => setWebhook(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setWebhook(v);
+                    patch({ notify_webhook: v.trim() });
+                  }}
                 />
               </label>
               <div className="opt-row">
@@ -286,12 +350,28 @@ export function SettingsPage({
               <Row
                 bare
                 title="定时签到后推送"
-                ctrl={<Toggle checked={notifySched} onChange={setNotifySched} />}
+                ctrl={
+                  <Toggle
+                    checked={notifySched}
+                    onChange={(v) => {
+                      setNotifySched(v);
+                      patch({ notify_on_schedule: v });
+                    }}
+                  />
+                }
               />
               <Row
                 bare
                 title="手动「全部签到」后推送"
-                ctrl={<Toggle checked={notifyManual} onChange={setNotifyManual} />}
+                ctrl={
+                  <Toggle
+                    checked={notifyManual}
+                    onChange={(v) => {
+                      setNotifyManual(v);
+                      patch({ notify_on_manual: v });
+                    }}
+                  />
+                }
               />
             </div>
           )}
@@ -299,10 +379,20 @@ export function SettingsPage({
       </div>
 
       {err && <p className="form-err">{err}</p>}
-      <div className="page-actions">
-        <button className="btn primary" disabled={busy} onClick={() => void doSave()}>
-          {busy ? "保存中…" : "保存"}
-        </button>
+      <div className="set-autosave">
+        {saving ? (
+          <>
+            <span className="spin-dot" />
+            保存中…
+          </>
+        ) : saved ? (
+          <>
+            <IconCheck size={14} />
+            修改已自动保存
+          </>
+        ) : (
+          <span className="muted">改动将自动保存</span>
+        )}
       </div>
     </section>
   );

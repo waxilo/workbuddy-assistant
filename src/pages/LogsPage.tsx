@@ -3,6 +3,7 @@ import type { Account, CheckinLog } from "../types";
 import { clearCheckinLogs, getCheckinLogs } from "../api";
 import { LogBadge, accountLabel, formatCredits } from "../common";
 import type { ConfirmReq, Toast } from "../common";
+import { IconTrash, IconList } from "../components/Icons";
 
 /**
  * 「签到日志」页：按时间倒序列出全部记录，可按账号筛选。
@@ -80,14 +81,19 @@ export function LogsPage({
             }
           }}
         >
+          <IconTrash size={15} />
           清空日志
         </button>
       </div>
 
       {loading ? (
-        <p>加载中…</p>
+        <p className="empty">加载中…</p>
       ) : logs.length === 0 ? (
-        <p className="empty">暂无签到记录。</p>
+        <div className="empty log-empty">
+          <IconList size={26} />
+          <span>暂无签到记录</span>
+          <span className="empty-sub">完成签到后，记录会按时间倒序显示在这里</span>
+        </div>
       ) : (
         <ul className="log-list page-list">
           {logs.map((l) => (
