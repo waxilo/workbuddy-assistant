@@ -391,12 +391,17 @@ pub fn stealth_status(app: tauri::AppHandle) -> Result<StealthStatus, String> {
 }
 
 /// 接管事件流（新的在前）：开启 / 关闭 / 开始使用账号 / 重启 / 错误。
+/// `proxy_request` 是网络救急判定「端点确实被用过」的内部证据，账号/会话信息
+/// 已由「开始使用账号」事件承载，展示层过滤掉避免重复刷屏。
 #[tauri::command]
 pub fn takeover_events(app: tauri::AppHandle) -> Vec<JournalEvent> {
     let Ok(dir) = crate::commands::try_data_dir(&app) else {
         return Vec::new();
     };
-    let mut all = journal_read(&dir);
+    let mut all: Vec<_> = journal_read(&dir)
+        .into_iter()
+        .filter(|e| e.event != "proxy_request")
+        .collect();
     all.reverse();
     all
 }

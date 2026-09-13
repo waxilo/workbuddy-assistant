@@ -343,6 +343,7 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
     let bare = normalize_target(&req.target);
     let path = upstream_path(bare).to_string();
     if bare == "/chat/completions" {
+        // 内部证据事件：仅供网络救急判定「端点被用过」，时间线展示层会过滤。
         stealth::journal_append(
             &dir,
             "proxy_request",
