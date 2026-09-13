@@ -12,8 +12,10 @@
 //!    换账号会丢上下文，必须粘住。新会话（粘滞过期或首次）才重新选。
 //! 2. **选账号**：谁的「还有余量的资源包」最早过期就用谁——把快过期的积分先消耗掉；
 //!    查不到过期时间的账号排最后，剩余积分为 0 的账号直接跳过（除非全员为 0）。
-//! 3. **续签兜底**：选中的账号若凭证临近过期（<48h）会先自动续签。
-//! 4. **转发**：路径与查询串原样保留，替换 `Authorization` 为选中账号的 token，
+//! 3. **限流无感切换**：免费模型触发限流（429）时，把该账号打入 10 分钟冷却、解绑
+//!    会话粘滞，换下一个账号重发同一请求（上限 2 次切换）；冷却中的账号路由优先跳过。
+//! 4. **续签兜底**：选中的账号若凭证临近过期（<48h）会先自动续签。
+//! 5. **转发**：路径与查询串原样保留，替换 `Authorization` 为选中账号的 token，
 //!    去掉逐跳头（Host / Content-Length 等）后透传其余请求头。
 //!
 //! **响应一律用 chunked 流式下发。** 对话是 SSE（`text/event-stream`），实测若缓冲成
@@ -91,6 +93,37 @@ fn last_snapshot() -> &'static Mutex<Option<Instant>> {
 fn sticky() -> &'static Mutex<HashMap<String, (Instant, String)>> {
     static STICKY: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
     STICKY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 账号触发限流（429）后的冷却时长：期间路由优先跳过它
+const COOLDOWN_TTL: Duration = Duration::from_secs(10 * 60);
+/// 同一次客户端请求里，最多换几个账号重试（首次 + 2 次切换）
+const FAILOVER_MAX_TRIES: usize = 3;
+
+/// 限流冷却表：账号 id → 进入冷却的时刻
+fn cooldown() -> &'static Mutex<HashMap<String, Instant>> {
+    static COOLDOWN: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    COOLDOWN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 账号是否仍在冷却期内
+fn cooling(id: &str) -> bool {
+    cooldown()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(id).map(|t| t.elapsed() < COOLDOWN_TTL))
+        .unwrap_or(false)
+}
+
+/// 候选软过滤（纯函数，便于单测）：优先剔除冷却中的账号；
+/// 若剔完为空（全员都在冷却）则原样返回——让上游裁决也比代理直接 503 有信息量。
+fn available_candidates<T: Clone>(candidates: &[T], is_cooling: impl Fn(&T) -> bool) -> Vec<T> {
+    let usable: Vec<T> = candidates.iter().filter(|a| !is_cooling(a)).cloned().collect();
+    if usable.is_empty() {
+        candidates.to_vec()
+    } else {
+        usable
+    }
 }
 
 /// 路由排序键：最早过期者优先 → 查不到过期时间的靠后 → 剩余积分多者略优先。
@@ -332,52 +365,97 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let Some(account) =
-        tauri::async_runtime::block_on(choose_account(&dir, conv.as_deref()))
-    else {
-        respond(&mut stream, 503, "text/plain", b"no account available", &[]);
-        return;
-    };
     let settings = accounts::load_settings(&dir);
     let host = settings.default_base_url;
     let bare = normalize_target(&req.target);
     let path = upstream_path(bare).to_string();
-    if bare == "/chat/completions" {
-        // 内部证据事件：仅供网络救急判定「端点被用过」，时间线展示层会过滤。
-        stealth::journal_append(
-            &dir,
-            "proxy_request",
-            &format!("长驻 CLI host 已使用接管端点（扣费账号：{}）", account.name),
-        );
-    }
+    let is_chat = bare == "/chat/completions";
     let url = upstream_url(&host, &path);
 
-    // 3. 透传
-    let upstream = tauri::async_runtime::block_on(async {
-        let mut r = CLIENT
-            .request(
-                reqwest::Method::from_bytes(req.method.as_bytes())
-                    .unwrap_or(reqwest::Method::GET),
-                &url,
-            )
-            .bearer_auth(&account.token);
-        for (k, v) in &req.headers {
-            if !hop_by_hop(k) {
-                r = r.header(k.as_str(), v.as_str());
-            }
+    // 3. 选账号并透传；免费模型限流（429）发生在流式输出开始前，响应头还没写给下游，
+    //    正好有重试窗口：把限流账号打入冷却、解绑会话粘滞，换下一个账号重发同一请求，
+    //    对 CLI 完全无感。重试次数有上限，用尽后 429 原样透传。
+    let mut ban: Vec<String> = Vec::new();
+    loop {
+        let Some(account) =
+            tauri::async_runtime::block_on(choose_account(&dir, conv.as_deref(), &ban))
+        else {
+            respond(&mut stream, 503, "text/plain", b"no account available", &[]);
+            return;
+        };
+        if ban.is_empty() && is_chat {
+            // 内部证据事件：仅供网络救急判定「端点被用过」，时间线展示层会过滤。
+            stealth::journal_append(
+                &dir,
+                "proxy_request",
+                &format!("长驻 CLI host 已使用接管端点（扣费账号：{}）", account.name),
+            );
         }
-        if !body.is_empty() {
-            r = r.body(body.to_vec());
-        }
-        r.send().await
-    });
 
-    match upstream {
-        Ok(resp) => stream_response(&mut stream, resp, &dir, &account, &host, &path),
-        Err(e) => {
-            let msg = format!("upstream error: {e}");
-            stealth::journal_append(&dir, "proxy_upstream_error", &msg);
-            respond(&mut stream, 502, "text/plain", msg.as_bytes(), &[]);
+        // 透传
+        let upstream = tauri::async_runtime::block_on(async {
+            let mut r = CLIENT
+                .request(
+                    reqwest::Method::from_bytes(req.method.as_bytes())
+                        .unwrap_or(reqwest::Method::GET),
+                    &url,
+                )
+                .bearer_auth(&account.token);
+            for (k, v) in &req.headers {
+                if !hop_by_hop(k) {
+                    r = r.header(k.as_str(), v.as_str());
+                }
+            }
+            if !body.is_empty() {
+                r = r.body(body.to_vec());
+            }
+            r.send().await
+        });
+
+        match upstream {
+            Ok(resp) if is_chat && resp.status() == 429 => {
+                // 限流账号冷却 + 会话解绑：同一会话的下一次请求也会自动绕开它
+                if let Ok(mut m) = cooldown().lock() {
+                    m.insert(account.id.clone(), Instant::now());
+                }
+                if let Some(c) = &conv {
+                    if let Ok(mut s) = sticky().lock() {
+                        s.remove(c);
+                    }
+                }
+                if ban.len() + 1 < FAILOVER_MAX_TRIES {
+                    ban.push(account.id.clone());
+                    stealth::journal_append(
+                        &dir,
+                        "failover",
+                        &format!(
+                            "账号「{}」触发限流（429），已无感切换备用账号继续服务",
+                            account.name
+                        ),
+                    );
+                    continue;
+                }
+                stealth::journal_append(
+                    &dir,
+                    "failover",
+                    &format!(
+                        "账号「{}」触发限流（429），已无更多备用账号，限流响应原样透传",
+                        account.name
+                    ),
+                );
+                stream_response(&mut stream, resp, &dir, &account, &host, &path);
+                return;
+            }
+            Ok(resp) => {
+                stream_response(&mut stream, resp, &dir, &account, &host, &path);
+                return;
+            }
+            Err(e) => {
+                let msg = format!("upstream error: {e}");
+                stealth::journal_append(&dir, "proxy_upstream_error", &msg);
+                respond(&mut stream, 502, "text/plain", msg.as_bytes(), &[]);
+                return;
+            }
         }
     }
 }
@@ -633,38 +711,51 @@ fn billing_candidates(accounts: &[crate::accounts::Account], selected: &[String]
 
 /// 选出一个该用的账号。
 ///
-/// 候选集 = 设置里勾选的扣费账号（未勾选的不允许扣费；全不勾 = 全部可用）。
+/// 候选集 = 设置里勾选的扣费账号（未勾选的不允许扣费；全不勾 = 全部可用），再做两层过滤：
+/// - **禁用（严格）**：`ban` 里的账号是本轮请求已试败的限流账号，直接剔除；剔完为空返回 None；
+/// - **冷却（软）**：近 10 分钟触发过限流的账号优先跳过，全员冷却则照常用。
+///
 /// 候选集内的优先级从高到低：
-/// 1. **会话粘滞**——一次对话中途换账号会丢上下文；粘滞账号若已被移出候选集则视为未命中；
+/// 1. **会话粘滞**——一次对话中途换账号会丢上下文；粘滞账号若已被移出候选集/在冷却则视为未命中；
 /// 2. **智能轮换**——快照过期就重新拉，按「最旧积分」挑。
 ///
 /// 会话首次落到某个账号（或被切换到新账号）时写一条 `route_start` 事件。
 /// 若选中的账号触发了续签，会就地保存账号列表。
-async fn choose_account(dir: &PathBuf, conv: Option<&str>) -> Option<crate::accounts::Account> {
+async fn choose_account(
+    dir: &PathBuf,
+    conv: Option<&str>,
+    ban: &[String],
+) -> Option<crate::accounts::Account> {
     let settings = accounts::load_settings(dir);
     let all = accounts::load_accounts(dir);
     if all.is_empty() {
         return None;
     }
-    let mut accounts = billing_candidates(&all, &settings.billing_account_ids);
+    let candidates = billing_candidates(&all, &settings.billing_account_ids);
+    // 限流重试时已试败的账号严格剔除：再试一次只会再吃一个 429
+    let accounts: Vec<_> = candidates
+        .into_iter()
+        .filter(|a| !ban.iter().any(|b| b == &a.id))
+        .collect();
     if accounts.is_empty() {
         return None;
     }
+    let usable = available_candidates(&accounts, |a| cooling(&a.id));
 
-    // 1) 已在进行的会话：继续用同一个账号（除非它已被移出扣费候选集）
+    // 1) 已在进行的会话：继续用同一个账号（除非它已被移出可用集）
     if let Some(conv) = conv {
         if let Some(id) = sticky_hit(conv) {
-            if let Some(a) = accounts.iter().find(|a| a.id == id) {
+            if let Some(a) = usable.iter().find(|a| a.id == id) {
                 return Some(a.clone());
             }
         }
     }
 
     // 2) 新会话：快照过期就重新拉，然后按最旧积分挑
-    let ids: Vec<String> = accounts.iter().map(|a| a.id.clone()).collect();
+    let ids: Vec<String> = usable.iter().map(|a| a.id.clone()).collect();
     let mut infos = cached_infos(&ids);
     if snapshot_is_stale() {
-        for (i, acct) in accounts.iter().enumerate() {
+        for (i, acct) in usable.iter().enumerate() {
             let host = commands::account_host(acct);
             let snap = fetch_credit_snapshot(&CLIENT, &host, &acct.token).await;
             infos[i] = CreditInfo {
@@ -676,13 +767,15 @@ async fn choose_account(dir: &PathBuf, conv: Option<&str>) -> Option<crate::acco
     }
 
     let idx = pick_index(&ids, &infos)?;
-    let mut account = accounts[idx].clone();
+    let mut account = usable[idx].clone();
     // 选中的账号若凭证临近过期，先续签（失败不阻断，仍用旧 token 试）
     if commands::ensure_fresh_token(&mut account).await.unwrap_or(false) {
-        if let Some(a) = accounts.iter_mut().find(|a| a.id == account.id) {
+        // 回填**全量**账号列表落盘：只存候选子集会把未勾选的账号从磁盘上删掉
+        let mut merged = all;
+        if let Some(a) = merged.iter_mut().find(|a| a.id == account.id) {
             *a = account.clone();
         }
-        let _ = accounts::save_accounts(dir, &accounts);
+        let _ = accounts::save_accounts(dir, &merged);
     }
     if let Some(conv) = conv {
         if sticky_put(conv, account.id.clone()) {
@@ -694,7 +787,7 @@ async fn choose_account(dir: &PathBuf, conv: Option<&str>) -> Option<crate::acco
                     "开始使用账号「{}」服务会话 {}（当前扣费备选 {} 个）",
                     account.name,
                     &conv.chars().take(8).collect::<String>(),
-                    accounts.len()
+                    usable.len()
                 ),
             );
         }
@@ -819,6 +912,32 @@ mod tests {
         assert_eq!(picked[0].id, "b");
         // 勾选的账号全部不存在（如已被删除）→ 退回全部，接管不瘫
         assert_eq!(billing_candidates(&all, &["zzz".to_string()]).len(), 3);
+    }
+
+    #[test]
+    fn available_candidates_skips_cooling_unless_all_cooling() {
+        let mk = |id: &str| crate::accounts::Account {
+            id: id.into(),
+            name: id.into(),
+            phone: None,
+            token: "tok".into(),
+            refresh_token: None,
+            expires_at: None,
+            base_url: None,
+            created_at: String::new(),
+            last: None,
+        };
+        let all = vec![mk("a"), mk("b"), mk("c")];
+        let ids = |v: &[crate::accounts::Account]| -> Vec<String> {
+            v.iter().map(|a| a.id.clone()).collect()
+        };
+        // 无人冷却 → 原样返回
+        assert_eq!(ids(&available_candidates(&all, |a| a.id == "x")).len(), 3);
+        // b 在冷却 → 跳过 b
+        let got = ids(&available_candidates(&all, |a| a.id == "b"));
+        assert_eq!(got, vec!["a".to_string(), "c".to_string()]);
+        // 全员冷却 → 软过滤退回全部：让上游裁决也比代理直接 503 有信息量
+        assert_eq!(ids(&available_candidates(&all, |_| true)).len(), 3);
     }
 
     #[test]

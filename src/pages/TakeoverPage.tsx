@@ -21,6 +21,8 @@ function eventKind(e: JournalEvent): {
       return { label: "关闭接管", cls: "off" };
     case "route_start":
       return { label: "开始使用账号", cls: "route" };
+    case "failover":
+      return { label: "限流切换", cls: "route" };
     case "restart_workbuddy":
       return { label: "重启 WorkBuddy", cls: "restart" };
     case "proxy_upstream_error":
