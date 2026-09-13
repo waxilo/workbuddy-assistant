@@ -6,21 +6,23 @@ on:
       - "v*"
   workflow_dispatch:
 
-# tauri-action 要用 GITHUB_TOKEN 创建 Release / 上传产物，默认 token 是只读的
+# gh CLI / tauri-action 要用 GITHUB_TOKEN 创建 Release / 上传产物，默认 token 是只读的
 permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS  runner 当前为 Apple Silicon；如需 Intel/通用包，见 README“跨平台说明”
+          # macOS runner 当前为 Apple Silicon；如需 Intel/通用包，见 README“跨平台说明”
           - platform: macos-latest
             args: ""
+            artifact: bundles-macos
           - platform: windows-latest
             args: ""
+            artifact: bundles-windows
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -43,35 +45,45 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build & publish (tauri-action)
+      # 只构建 + 本地签名，不创建/上传 Release。发布统一交给 normalize-assets 用 gh CLI 完成，
+      # 彻底绕开 tauri-action 在 Node 下发布步骤的兼容问题（create-a-release 偶发 403 / Node 24 静默崩溃）。
+      - name: Build & sign (tauri-action, no publish)
         uses: tauri-apps/tauri-action@v0
-        # 2025-09 起 runner 默认强制 Node 24，而 tauri-action@v0 是 Node 20 动作，
-        # 其发布（上传产物）JS 在 Node 24 下会静默崩溃（构建/打包/签名都成功，唯独上传失败）。
-        # 该变量允许 Node 20 动作回退到原生运行时，恢复发布步骤。
+        # 2025-09 起 runner 默认强制 Node 24，而 tauri-action@v0 是 Node 20 动作；
+        # 该变量允许它回退到原生 Node 20 运行时，避免构建包装层在 Node 24 下出问题。
         env:
           ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 更新签名私钥（在仓库 Secrets 中配置，见 README）
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "WorkBuddy 签到助手 ${{ github.ref_name }}"
-          releaseBody: "自动构建的桌面安装包（macOS / Windows）。"
-          releaseDraft: true
-          prerelease: false
+          release: false
           args: ${{ matrix.args }}
 
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          # tauri 把所有安装包与 .sig 签名放在 bundle 目录
+          path: src-tauri/target/release/bundle/
+          if-no-files-found: error
+
   # 产物命名统一：Tauri 默认产物名只有架构（aarch64/x64），两平台混在一个 Release 里不好分辨。
-  # 这里在架构前插入 macos_ / windows_ 平台标识，并同步修正 latest.json 里的下载 URL
-  # （更新签名只覆盖文件内容，改名不影响校验），最后把 draft Release 转正——
-  # 应用内「检查更新」走 releases/latest/download/latest.json，draft 状态下取不到。
+  # 这里在架构前插入 macos_ / windows_ 平台标识，并全量重建 latest.json（签名只覆盖文件内容，
+  # 改名不影响校验），最后创建 Release 并转正——应用内「检查更新」走 releases/latest/download/latest.json，
+  # draft 状态下取不到。
   normalize-assets:
-    needs: [release]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: Rename assets (add platform) & publish release
+      - name: Download all bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Flatten, rename & publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -79,32 +91,57 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p assets && cd assets
-          gh release download "$TAG" --repo "$REPO" --clobber
 
-          # latest.json 不信任 tauri-action 的产出：两个平台 job 会互相覆盖，
-          # 实测 v0.1.0 的 latest.json 只剩 windows 平台，macOS 端「检查更新」直接报
-          # "None of the fallback platforms" 。这里从改名后的产物 + .sig 签名文件
-          # 全量重建，平台覆盖以实际存在的安装包为准（签名只覆盖文件内容，改名无影响）。
           python3 - <<'PY'
-          import json, os, subprocess
+          import json, os, shutil
           from datetime import datetime, timezone
 
           tag, repo = os.environ["TAG"], os.environ["REPO"]
-          mapping = {}
-          for f in sorted(os.listdir(".")):
-              if f == "latest.json":
+
+          # 递归收集所有 bundle 文件（artifact 合并后目录层级较深），
+          # 改名加平台前缀后统一拍平到 assets/ 根目录；冲突时追加序号，避免静默丢文件。
+          collected = []
+          for root, _, fs in os.walk("."):
+              if root == ".":
                   continue
-              new = f
-              if "_aarch64" in f:          # macOS Apple Silicon
-                  new = f.replace("_aarch64", "_macos_aarch64")
-              elif "_x86_64" in f:         # macOS Intel
-                  new = f.replace("_x86_64", "_macos_x86_64")
-              elif "_x64" in f:            # Windows x64
-                  new = f.replace("_x64", "_windows_x64")
-              if new != f:
-                  os.rename(f, new)
-                  mapping[f] = new
+              for name in fs:
+                  collected.append(os.path.join(root, name))
+          collected.sort()
+
+          def target_name(f):
+              base = os.path.basename(f)
+              if "_aarch64" in base:        # macOS Apple Silicon
+                  return base.replace("_aarch64", "_macos_aarch64")
+              if "_x86_64" in base:         # macOS Intel
+                  return base.replace("_x86_64", "_macos_x86_64")
+              if "_x64" in base:            # Windows x64
+                  return base.replace("_x64", "_windows_x64")
+              return base
+
+          mapping = {}
+          for f in collected:
+              if os.path.basename(f) == "latest.json":
+                  continue
+              new = target_name(f)
+              dest = new
+              # 冲突保护
+              if os.path.exists(dest):
+                  i = 1
+                  stem, ext = os.path.splitext(new)
+                  while os.path.exists(dest):
+                      dest = f"{stem}_{i}{ext}"
+                      i += 1
+              shutil.move(f, dest)
+              mapping[os.path.basename(f)] = dest
           print("renamed:", json.dumps(mapping, indent=2))
+
+          # 清理已拍平的空目录
+          for root, dirs, _ in os.walk(".", topdown=False):
+              for d in dirs:
+                  try:
+                      os.rmdir(os.path.join(root, d))
+                  except OSError:
+                      pass
 
           base = f"https://github.com/{repo}/releases/download/{tag}"
           files = set(os.listdir("."))
@@ -148,15 +185,15 @@ jobs:
           }
           json.dump(manifest, open("latest.json", "w"), ensure_ascii=False, indent=2)
           print("platforms:", list(platforms.keys()))
-
-          # 删除 Release 上的旧资产（本地已有全量副本，改名后整体重传）
-          releases = json.loads(subprocess.check_output(
-              ["gh", "api", f"repos/{repo}/releases"]).decode())
-          rel = next(r for r in releases if r["tag_name"] == tag)
-          for a in rel["assets"]:
-              subprocess.run(["gh", "api", "-X", "DELETE",
-                              f"repos/{repo}/releases/assets/{a['id']}"], check=True)
           PY
 
-          gh release upload "$TAG" ./* --repo "$REPO" --clobber
+          # 创建 draft Release 并上传全部产物（含改名后的安装包、.sig、latest.json）
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --draft \
+            --title "WorkBuddy 签到助手 $TAG" \
+            --notes "自动构建的桌面安装包（macOS / Windows）。" \
+            ./*
+
+          # draft 状态下应用内「检查更新」取不到，这里转正并设为 latest
           gh release edit "$TAG" --repo "$REPO" --draft=false --latest
