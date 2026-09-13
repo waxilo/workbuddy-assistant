@@ -31,10 +31,16 @@ function eventKind(e: JournalEvent): {
   }
 }
 
+/** 全选归一：列表覆盖全部账号时存空（= 默认全选，新增账号自动可扣费） */
+function normalizeBilling(list: string[], allIds: string[]): string[] {
+  return allIds.length > 0 && list.length === allIds.length ? [] : list;
+}
+
 /**
- * 「无感接管」页：顶部一条紧凑控制条（小开关 + 状态 + 扣费账号摘要 + 端口 + 保存），
- * 下方「接管动态」铺满剩余空间（列表内部滚动，页面不出滚动条）。
- * 扣费账号默认全部勾选（billing 为空 = 全选，智能轮换），点摘要弹框细选。
+ * 「无感接管」页：顶部一条紧凑控制条（小开关 + 状态 + 扣费账号摘要 + 端口），
+ * 下方「接管动态」铺满剩余空间（列表内部滚动、滚动条隐藏）。
+ * 没有保存按钮：开关拨动立即应用；端口仅在关闭时可改（失焦即存）；
+ * 扣费账号在弹框里点「保存」立即生效。
  */
 export function TakeoverPage({
   settings,
@@ -55,6 +61,9 @@ export function TakeoverPage({
   // 扣费备选池：空 = 默认全部勾选（智能轮换）；非空 = 只有勾选的账号允许扣费
   const [billing, setBilling] = useState<string[]>(settings.billing_account_ids);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // 弹框草稿：打开时复制当前生效值，点「保存」才落库生效
+  const [draft, setDraft] = useState<string[] | null>(null);
+  const [query, setQuery] = useState("");
   const [stealth, setStealth] = useState<StealthStatus | null>(null);
   const [events, setEvents] = useState<JournalEvent[]>([]);
   const [busy, setBusy] = useState(false);
@@ -100,48 +109,33 @@ export function TakeoverPage({
     }
   };
 
-  // 只覆盖接管相关字段，其余设置原样透传 —— 本页对它们没有编辑权
-  const snapshot = (): Settings => ({
+  /** 组装一份以当前界面状态为准的设置 */
+  const snapshot = (over?: Partial<Settings>): Settings => ({
     ...settings,
     proxy_enabled: proxyOn,
     proxy_port: Number(proxyPort) || 8787,
     billing_account_ids: billing,
+    ...over,
   });
 
-  const doSave = async () => {
+  /** 开关即拨即用：确认后立即应用（开启/关闭都会安全重启 WorkBuddy） */
+  const doToggle = async (next: boolean) => {
+    const action = next ? "开启接管" : "关闭接管";
+    const ok = await askConfirm({
+      title: `${action}并重启 WorkBuddy`,
+      body:
+        `${action}需要重启 WorkBuddy 与长驻 CLI host，才能安全清除旧端点。` +
+        "代理会在整个切换过程中保持可用，不会留下死端口。现在继续吗？（请先保存未提交的输入）",
+      okText: action,
+    });
+    if (!ok) return; // 取消：开关状态不动
     setBusy(true);
     setErr("");
     try {
-      const s = snapshot();
-      const takeoverChanged =
-        s.proxy_enabled !== settings.proxy_enabled ||
-        (s.proxy_enabled && s.proxy_port !== settings.proxy_port);
-      if (takeoverChanged) {
-        const action = !settings.proxy_enabled
-          ? "开启接管"
-          : !s.proxy_enabled
-          ? "关闭接管"
-          : "切换接管端口";
-        const ok = await askConfirm({
-          title: `${action}并重启 WorkBuddy`,
-          body:
-            `${action}需要重启 WorkBuddy 与长驻 CLI host，才能安全清除旧端点。` +
-            "代理会在整个切换过程中保持可用，不会留下死端口。现在继续吗？（请先保存未提交的输入）",
-          okText: action,
-        });
-        if (!ok) {
-          setBusy(false);
-          return;
-        }
-      }
-      const saved = takeoverChanged
-        ? await applySettings(s)
-        : await saveSettings(s);
+      const saved = await applySettings(snapshot({ proxy_enabled: next }));
       onSettings(saved);
-      onToast({
-        kind: "ok",
-        text: takeoverChanged ? "已应用，WorkBuddy 已安全重启" : "已保存",
-      });
+      setProxyOn(next);
+      onToast({ kind: "ok", text: `已${action}，WorkBuddy 已安全重启` });
       await refreshStealth();
     } catch (e) {
       setErr(String(e));
@@ -150,23 +144,49 @@ export function TakeoverPage({
     }
   };
 
-  /**
-   * 弹框里勾/去勾。基准：billing 为空视为「当前全选」，
-   * 勾回全满时归一为空列表（= 默认全选，新增账号也自动可扣费）。
-   */
-  const toggleBilling = (id: string) =>
-    setBilling((list) => {
-      const base = list.length === 0 ? allIds : list;
-      const next = base.includes(id)
+  /** 端口只在接管关闭时可改；失焦时若变了就立即落盘（纯配置，无需重启） */
+  const onPortBlur = async () => {
+    const port = Number(proxyPort) || 8787;
+    if (proxyOn || port === settings.proxy_port) return;
+    try {
+      const saved = await saveSettings(snapshot({ proxy_port: port }));
+      onSettings(saved);
+      onToast({ kind: "ok", text: "端口已保存" });
+    } catch (e) {
+      onToast({ kind: "err", text: "端口保存失败：" + String(e) });
+    }
+  };
+
+  /** 弹框「保存」：草稿落库立即生效（纯账号池调整，不需要重启） */
+  const doSaveBilling = async () => {
+    if (draft == null) return;
+    const next = normalizeBilling(draft, allIds);
+    setBusy(true);
+    setErr("");
+    try {
+      const saved = await saveSettings(
+        snapshot({ billing_account_ids: next })
+      );
+      onSettings(saved);
+      setBilling(next);
+      setDraft(null);
+      setPickerOpen(false);
+      onToast({ kind: "ok", text: "扣费账号已生效" });
+    } catch (e) {
+      onToast({ kind: "err", text: "保存失败：" + String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 弹框草稿里勾/去勾（基准：草稿为空视为「当前全选」） */
+  const toggleDraft = (id: string) =>
+    setDraft((list) => {
+      const base = list == null ? effective : list.length === 0 ? allIds : list;
+      return base.includes(id)
         ? base.filter((x) => x !== id)
         : [...base, id];
-      return next.length === allIds.length && allIds.length > 0 ? [] : next;
     });
-
-  const pending =
-    proxyOn !== settings.proxy_enabled ||
-    Number(proxyPort) !== settings.proxy_port ||
-    JSON.stringify(billing) !== JSON.stringify(settings.billing_account_ids);
 
   const live = stealth?.installed && stealth.alive;
 
@@ -182,9 +202,9 @@ export function TakeoverPage({
   const stateText = live
     ? "接管生效中，对话正按备选账号扣费"
     : stealth?.installed
-    ? "状态异常：关闭开关再保存即可恢复直连"
+    ? "状态异常：关闭开关即可恢复直连"
     : proxyOn
-    ? "保存后生效：会安全重启 WorkBuddy"
+    ? "应用中：会安全重启 WorkBuddy"
     : "开启后对话自动按备选账号分流扣费";
 
   /**
@@ -204,15 +224,32 @@ export function TakeoverPage({
     return out.slice(0, 80);
   }, [events]);
 
+  /** 弹框内按用户名 / 手机号过滤 */
+  const filteredAccounts = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return accounts;
+    return accounts.filter(
+      (a) =>
+        a.name.toLowerCase().includes(q) || (a.phone ?? "").includes(q)
+    );
+  }, [accounts, query]);
+
+  const draftEffective =
+    draft == null ? effective : draft.length === 0 ? allIds : draft;
+
   return (
     <section className="panel-page tk-page">
-      {/* ── 紧凑控制条：开关 + 状态 + 扣费账号 + 端口 + 保存 ── */}
+      {/* ── 紧凑控制条：开关 + 状态 + 扣费账号 + 端口 ── */}
       <div className={`tk-bar ${live ? "live" : ""}`}>
-        <label className="switch" title="开启后 WorkBuddy 的对话请求将由本地代理分流扣费">
+        <label
+          className="switch"
+          title="开启后 WorkBuddy 的对话请求将由本地代理分流扣费"
+        >
           <input
             type="checkbox"
             checked={proxyOn}
-            onChange={(e) => setProxyOn(e.target.checked)}
+            disabled={busy}
+            onChange={(e) => void doToggle(e.target.checked)}
           />
           <span className="track">
             <span className="thumb" />
@@ -226,38 +263,36 @@ export function TakeoverPage({
         <button
           className="tk-accts"
           title="勾选的账号才允许被扣费，未勾选的会被排除；点击细选"
-          onClick={() => setPickerOpen(true)}
+          onClick={() => {
+            setDraft(billing);
+            setQuery("");
+            setPickerOpen(true);
+          }}
         >
           <span className="ta-label">扣费账号</span>
           <span className="ta-value">{billingSummary}</span>
           <span className="ta-edit">选择</span>
         </button>
-        <label className="tk-port">
+        <label
+          className="tk-port"
+          title={proxyOn ? "接管开启期间不允许修改端口；请先关闭接管" : "代理监听端口"}
+        >
           端口
           <input
             type="number"
             value={proxyPort}
             min={1024}
             max={65535}
+            disabled={proxyOn || busy}
             onChange={(e) => setProxyPort(e.target.value)}
+            onBlur={() => void onPortBlur()}
           />
         </label>
-        <button
-          className="btn primary small"
-          disabled={busy || !pending}
-          onClick={() => void doSave()}
-        >
-          {busy
-            ? "应用中…"
-            : proxyOn !== settings.proxy_enabled
-            ? "应用并重启"
-            : "保存"}
-        </button>
       </div>
 
       {err && <p className="form-err">{err}</p>}
 
-      {/* ── 接管动态：铺满剩余空间，列表内部滚动 ── */}
+      {/* ── 接管动态：铺满剩余空间，列表内部滚动（滚动条隐藏） ── */}
       <div className="tk-section tk-feed">
         <div className="tk-sec-head">
           <h3>接管动态</h3>
@@ -297,47 +332,79 @@ export function TakeoverPage({
         )}
       </div>
 
-      {/* ── 扣费账号选择弹框 ── */}
+      {/* ── 扣费账号选择弹框（草稿制：点「保存」才生效） ── */}
       {pickerOpen && (
-        <div className="modal-mask" onClick={() => setPickerOpen(false)}>
+        <div
+          className="modal-mask"
+          onClick={() => {
+            setDraft(null);
+            setPickerOpen(false);
+          }}
+        >
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>选择扣费账号</h2>
             <p className="hint">
               勾选的账号才允许被扣费（会话粘滞 + 积分最早过期优先轮换），未勾选的账号会被排除；
-              默认全部勾选（智能轮换）。万一接管异常，把开关关闭再保存，或走「网络急救 → 一键恢复」。
+              默认全部勾选（智能轮换）。点「保存」立即生效，无需重启。
             </p>
+            <input
+              type="text"
+              className="acct-filter"
+              placeholder="按用户名或手机号过滤…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
             {accounts.length === 0 ? (
               <p className="hint">还没有账号。先到「账号签到」页登录或导入账号。</p>
+            ) : filteredAccounts.length === 0 ? (
+              <p className="hint">没有匹配「{query}」的账号。</p>
             ) : (
               <ul className="acct-multi">
-                {accounts.map((a) => (
+                {filteredAccounts.map((a) => (
                   <li
                     key={a.id}
-                    className={effective.includes(a.id) ? "picked" : ""}
-                    onClick={() => toggleBilling(a.id)}
+                    className={draftEffective.includes(a.id) ? "picked" : ""}
+                    onClick={() => toggleDraft(a.id)}
                   >
                     <input
                       type="checkbox"
-                      checked={effective.includes(a.id)}
-                      onChange={() => toggleBilling(a.id)}
+                      checked={draftEffective.includes(a.id)}
+                      onChange={() => toggleDraft(a.id)}
                       onClick={(e) => e.stopPropagation()}
                     />
                     <span className="am-name">{a.name}</span>
                     {a.phone && <span className="am-phone">{a.phone}</span>}
                     <span className="am-state">
-                      {effective.includes(a.id) ? "可扣费" : "已排除"}
+                      {draftEffective.includes(a.id) ? "可扣费" : "已排除"}
                     </span>
                   </li>
                 ))}
               </ul>
             )}
             <div className="modal-actions">
-              <button className="btn" onClick={() => setBilling([])}>
+              <button
+                className="btn"
+                onClick={() => setDraft(allIds)}
+                disabled={accounts.length === 0}
+              >
                 全部勾选
               </button>
               <span className="spacer" />
-              <button className="btn primary" onClick={() => setPickerOpen(false)}>
-                完成
+              <button
+                className="btn"
+                onClick={() => {
+                  setDraft(null);
+                  setPickerOpen(false);
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="btn primary"
+                disabled={busy || draft == null}
+                onClick={() => void doSaveBilling()}
+              >
+                {busy ? "保存中…" : "保存"}
               </button>
             </div>
           </div>

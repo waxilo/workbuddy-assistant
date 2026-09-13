@@ -1075,6 +1075,19 @@ body {
   display: grid;
   gap: 8px;
 }
+/* 弹框里的账号过滤输入框 */
+.acct-filter {
+  margin: 0 0 10px !important;
+}
+/* 弹框里的账号列表限高，超出内部滚动（滚动条隐藏，与接管动态一致） */
+.acct-multi {
+  max-height: 44vh;
+  overflow: auto;
+  scrollbar-width: none;
+}
+.acct-multi::-webkit-scrollbar {
+  display: none;
+}
 .acct-multi li {
   display: flex;
   align-items: center;
@@ -1121,7 +1134,7 @@ body {
   background: #eaefff;
 }
 
-/* 接管动态时间线（页面下方区块，列表内部滚动，不把页面无限撑高） */
+/* 接管动态时间线（铺满剩余高度，内部滚动且滚动条隐藏） */
 .evt-list {
   list-style: none;
   margin: 0;
@@ -1129,8 +1142,11 @@ body {
   display: grid;
   gap: 0;
   align-content: start;
-  max-height: 42vh;
   overflow: auto;
+  scrollbar-width: none; /* Firefox */
+}
+.evt-list::-webkit-scrollbar {
+  display: none; /* WebKit / Tauri WebView：日志多时只滚不显滚动条 */
 }
 .evt {
   display: flex;
