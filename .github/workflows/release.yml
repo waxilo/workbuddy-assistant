@@ -57,3 +57,61 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # 产物命名统一：Tauri 默认产物名只有架构（aarch64/x64），两平台混在一个 Release 里不好分辨。
+  # 这里在架构前插入 macos_ / windows_ 平台标识，并同步修正 latest.json 里的下载 URL
+  # （更新签名只覆盖文件内容，改名不影响校验），最后把 draft Release 转正——
+  # 应用内「检查更新」走 releases/latest/download/latest.json，draft 状态下取不到。
+  normalize-assets:
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rename assets (add platform) & publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets && cd assets
+          gh release download "$TAG" --repo "$REPO" --clobber
+
+          python3 - <<'PY'
+          import json, os, subprocess
+
+          tag, repo = os.environ["TAG"], os.environ["REPO"]
+          mapping = {}
+          for f in sorted(os.listdir(".")):
+              if f == "latest.json":
+                  continue
+              new = f
+              if "_aarch64" in f:          # macOS Apple Silicon
+                  new = f.replace("_aarch64", "_macos_aarch64")
+              elif "_x86_64" in f:         # macOS Intel
+                  new = f.replace("_x86_64", "_macos_x86_64")
+              elif "_x64" in f:            # Windows x64
+                  new = f.replace("_x64", "_windows_x64")
+              if new != f:
+                  os.rename(f, new)
+                  mapping[f] = new
+
+          # latest.json 里的下载 URL 同步改成新文件名
+          text = open("latest.json").read()
+          for old, new in mapping.items():
+              text = text.replace(old, new)
+          json.loads(text)  # 改完必须仍是合法 JSON
+          open("latest.json", "w").write(text)
+          print("renamed:", json.dumps(mapping, indent=2))
+
+          # 删除 Release 上的旧资产（本地已有全量副本，改名后整体重传）
+          releases = json.loads(subprocess.check_output(
+              ["gh", "api", f"repos/{repo}/releases"]).decode())
+          rel = next(r for r in releases if r["tag_name"] == tag)
+          for a in rel["assets"]:
+              subprocess.run(["gh", "api", "-X", "DELETE",
+                              f"repos/{repo}/releases/assets/{a['id']}"], check=True)
+          PY
+
+          gh release upload "$TAG" assets/* --repo "$REPO" --clobber
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest
