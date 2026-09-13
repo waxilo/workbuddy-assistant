@@ -248,7 +248,14 @@ pub fn install(home: &Path, data_dir: &Path, port: u16) -> Result<(), String> {
     // 先落租约再改配置：中途崩了也留有记录，sweep 能收尾
     save_lease(data_dir, &lease).map_err(|e| format!("写入租约失败：{e}"))?;
     set_endpoint(target_config(home).as_path(), Some(&url))?;
-    journal_append(data_dir, "install", &format!("端点写入 env.{ENV_KEY}={url}"));
+    // 事件里带上扣费备选名单，界面时间线能直接回答「开启时当前账号池是什么」
+    let settings = crate::accounts::load_settings(data_dir);
+    let names = billing_account_names(data_dir, &settings.billing_account_ids);
+    journal_append(
+        data_dir,
+        "install",
+        &format!("接管已开启：端点写入 env.{ENV_KEY}={url}；扣费备选：{names}"),
+    );
     Ok(())
 }
 
@@ -283,7 +290,7 @@ pub fn uninstall(home: &Path, data_dir: &Path) -> Result<(), String> {
         _ => {}
     }
     if changed {
-        journal_append(data_dir, "uninstall", "端点已从 WorkBuddy 配置摘除");
+        journal_append(data_dir, "uninstall", "接管已关闭：端点已从 WorkBuddy 配置摘除，WorkBuddy 恢复直连");
     }
     let _ = fs::remove_file(lease_path(data_dir));
     Ok(())
@@ -356,11 +363,42 @@ fn home_dir() -> Result<PathBuf, String> {
     dirs::home_dir().ok_or_else(|| "无法定位家目录，无法读写 WorkBuddy 全局配置。".to_string())
 }
 
+/// 扣费备选账号的人话名单（用于事件详情）。
+/// 全没勾 = 「全部账号（智能轮换）」；有勾 = 逐个列名。
+fn billing_account_names(data_dir: &Path, selected: &[String]) -> String {
+    if selected.is_empty() {
+        return "全部账号（智能轮换）".to_string();
+    }
+    let accounts = crate::accounts::load_accounts(data_dir);
+    let names: Vec<String> = selected
+        .iter()
+        .map(|id| {
+            accounts
+                .iter()
+                .find(|a| &a.id == id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| id.chars().take(8).collect())
+        })
+        .collect();
+    format!("{}（未选中的不扣费）", names.join("、"))
+}
+
 /// 查询接管状态（只读）
 #[tauri::command]
 pub fn stealth_status(app: tauri::AppHandle) -> Result<StealthStatus, String> {
     let dir = crate::commands::try_data_dir(&app)?;
     Ok(status(&home_dir()?, &dir))
+}
+
+/// 接管事件流（新的在前）：开启 / 关闭 / 开始使用账号 / 重启 / 错误。
+#[tauri::command]
+pub fn takeover_events(app: tauri::AppHandle) -> Vec<JournalEvent> {
+    let Ok(dir) = crate::commands::try_data_dir(&app) else {
+        return Vec::new();
+    };
+    let mut all = journal_read(&dir);
+    all.reverse();
+    all
 }
 
 /// 安全停止接管：摘掉端点后重启 WorkBuddy，清除长驻 CLI host 缓存，再停止监听。

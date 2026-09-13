@@ -627,10 +627,18 @@ fn sticky_hit(conv: &str) -> Option<String> {
     Some(id.clone())
 }
 
-fn sticky_put(conv: &str, account_id: String) {
+/// 写入/刷新会话粘滞。返回 true 表示该会话**换到了新账号**（首次上代理或被切换），
+/// 调用方据此写「开始使用账号」事件；同一会话的后续请求返回 false，不刷屏。
+fn sticky_put(conv: &str, account_id: String) -> bool {
     if let Ok(mut map) = sticky().lock() {
+        let changed = map
+            .get(conv)
+            .map(|(_, id)| id != &account_id)
+            .unwrap_or(true);
         map.insert(conv.to_string(), (Instant::now(), account_id));
+        return changed;
     }
+    false
 }
 
 /// 快照是否过期（决定新会话要不要重新打资源接口）
@@ -667,46 +675,48 @@ fn store_infos(ids: &[String], infos: &[CreditInfo]) {
     }
 }
 
-/// 用户指定优先扣费账号时的定位：按 id 找，找得到返回下标。
-/// 独立成纯函数便于单测（选号规则里唯一需要「硬指定」语义的部分）。
-fn preferred_account_index(ids: &[String], preferred: Option<&str>) -> Option<usize> {
-    let pref = preferred?;
-    ids.iter().position(|id| id == pref)
+/// 扣费候选集过滤（纯函数，便于单测）：设置里勾了谁，谁才有资格被扣费。
+///
+/// - 勾选列表为空 = 不限制，全部账号都可作为备选；
+/// - 勾选的 id 在账号列表里一个都找不到（比如账号已删光）→ 退回全部，
+///   宁可多扣也不能让接管直接瘫掉；用户在界面上能看到「备选为空」的提示。
+fn billing_candidates(accounts: &[crate::accounts::Account], selected: &[String]) -> Vec<crate::accounts::Account> {
+    if selected.is_empty() {
+        return accounts.to_vec();
+    }
+    let picked: Vec<_> = accounts
+        .iter()
+        .filter(|a| selected.iter().any(|s| s == &a.id))
+        .cloned()
+        .collect();
+    if picked.is_empty() {
+        accounts.to_vec()
+    } else {
+        picked
+    }
 }
 
 /// 选出一个该用的账号。
 ///
-/// 优先级从高到低：
-/// 1. **用户指定的优先扣费账号**——设置了就坚决用它（覆盖粘滞与轮换，测试扣费用）；
-/// 2. 会话粘滞——一次对话中途换账号会丢上下文；
-/// 3. 智能轮换——快照过期就重新拉，按「最旧积分」挑。
+/// 候选集 = 设置里勾选的扣费账号（未勾选的不允许扣费；全不勾 = 全部可用）。
+/// 候选集内的优先级从高到低：
+/// 1. **会话粘滞**——一次对话中途换账号会丢上下文；粘滞账号若已被移出候选集则视为未命中；
+/// 2. **智能轮换**——快照过期就重新拉，按「最旧积分」挑。
 ///
+/// 会话首次落到某个账号（或被切换到新账号）时写一条 `route_start` 事件。
 /// 若选中的账号触发了续签，会就地保存账号列表。
 async fn choose_account(dir: &PathBuf, conv: Option<&str>) -> Option<crate::accounts::Account> {
-    let mut accounts = accounts::load_accounts(dir);
+    let settings = accounts::load_settings(dir);
+    let all = accounts::load_accounts(dir);
+    if all.is_empty() {
+        return None;
+    }
+    let mut accounts = billing_candidates(&all, &settings.billing_account_ids);
     if accounts.is_empty() {
         return None;
     }
 
-    // 0) 硬指定：优先扣费账号可用就非它不可
-    let preferred = accounts::load_settings(dir).preferred_account_id;
-    let ids: Vec<String> = accounts.iter().map(|a| a.id.clone()).collect();
-    if let Some(idx) = preferred_account_index(&ids, preferred.as_deref()) {
-        let mut account = accounts[idx].clone();
-        // 凭证临近过期先续签（失败不阻断，仍用旧 token 试）
-        if commands::ensure_fresh_token(&mut account).await.unwrap_or(false) {
-            if let Some(a) = accounts.iter_mut().find(|a| a.id == account.id) {
-                *a = account.clone();
-            }
-            let _ = accounts::save_accounts(dir, &accounts);
-        }
-        if let Some(conv) = conv {
-            sticky_put(conv, account.id.clone());
-        }
-        return Some(account);
-    }
-
-    // 1) 已在进行的会话：继续用同一个账号
+    // 1) 已在进行的会话：继续用同一个账号（除非它已被移出扣费候选集）
     if let Some(conv) = conv {
         if let Some(id) = sticky_hit(conv) {
             if let Some(a) = accounts.iter().find(|a| a.id == id) {
@@ -716,6 +726,7 @@ async fn choose_account(dir: &PathBuf, conv: Option<&str>) -> Option<crate::acco
     }
 
     // 2) 新会话：快照过期就重新拉，然后按最旧积分挑
+    let ids: Vec<String> = accounts.iter().map(|a| a.id.clone()).collect();
     let mut infos = cached_infos(&ids);
     if snapshot_is_stale() {
         for (i, acct) in accounts.iter().enumerate() {
@@ -739,7 +750,19 @@ async fn choose_account(dir: &PathBuf, conv: Option<&str>) -> Option<crate::acco
         let _ = accounts::save_accounts(dir, &accounts);
     }
     if let Some(conv) = conv {
-        sticky_put(conv, account.id.clone());
+        if sticky_put(conv, account.id.clone()) {
+            // 该会话第一次走上代理，或被切到了新账号 —— 记一条「开始使用」事件
+            stealth::journal_append(
+                dir,
+                "route_start",
+                &format!(
+                    "开始使用账号「{}」服务会话 {}（当前扣费备选 {} 个）",
+                    account.name,
+                    &conv.chars().take(8).collect::<String>(),
+                    accounts.len()
+                ),
+            );
+        }
     }
     Some(account)
 }
@@ -840,15 +863,27 @@ mod tests {
     }
 
     #[test]
-    fn preferred_account_index_finds_exact_id() {
-        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(preferred_account_index(&ids, Some("b")), Some(1));
-        // 指定了但不存在 → None（自动降级为普通选号，而不是报错）
-        assert_eq!(preferred_account_index(&ids, Some("zzz")), None);
-        // 未指定 → None
-        assert_eq!(preferred_account_index(&ids, None), None);
-        // 空 id 同样视为未指定（配置层也会归一，这里双保险）
-        assert_eq!(preferred_account_index(&ids, Some("")), None);
+    fn billing_candidates_restricts_to_selected_accounts() {
+        let mk = |id: &str| crate::accounts::Account {
+            id: id.into(),
+            name: id.into(),
+            phone: None,
+            token: "tok".into(),
+            refresh_token: None,
+            expires_at: None,
+            base_url: None,
+            created_at: String::new(),
+            last: None,
+        };
+        let all = vec![mk("a"), mk("b"), mk("c")];
+        // 未勾选 = 全部可用
+        assert_eq!(billing_candidates(&all, &[]).len(), 3);
+        // 勾了 b → 只有 b 有资格被扣费
+        let picked = billing_candidates(&all, &["b".to_string()]);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].id, "b");
+        // 勾选的账号全部不存在（如已被删除）→ 退回全部，接管不瘫
+        assert_eq!(billing_candidates(&all, &["zzz".to_string()]).len(), 3);
     }
 
     #[test]

@@ -47,8 +47,8 @@ export interface Settings {
   proxy_enabled: boolean;
   /** 反代监听端口 */
   proxy_port: number;
-  /** 优先扣费账号 id；null = 自动（粘滞 + 最旧积分优先）。设置后坚决用它，便于定向测试扣费 */
-  preferred_account_id: string | null;
+  /** 扣费备选账号 id 列表（多选）：反代只在这批账号里选号扣费；空 = 全部可用 */
+  billing_account_ids: string[];
   /** 多账号风控预防：批量签到时在账号之间加入随机间隔 */
   stagger_checkin: boolean;
   /** 随机间隔上限（秒），实际在 2..=max 之间取值 */
@@ -196,4 +196,13 @@ export interface RouteLog {
   status: number;
   /** 是否为 SSE 流式响应 */
   stream: boolean;
+}
+
+/** 接管事件流的一条记录（takeover-journal.jsonl） */
+export interface JournalEvent {
+  at_ms: number;
+  at: string;
+  /** install / uninstall / route_start / restart_workbuddy / proxy_upstream_error / … */
+  event: string;
+  detail: string;
 }

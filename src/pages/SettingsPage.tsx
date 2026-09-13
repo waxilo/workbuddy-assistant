@@ -7,7 +7,7 @@ import type { Toast } from "../common";
  * 「设置」页：定时签到 / 通知 / 风控 / 自启动等常规配置。
  *
  * 网络急救与无感接管都已是独立页面，这里不再混排；
- * 接管相关字段（proxy_* / preferred_account_id）本页没有编辑权，保存时原样透传。
+ * 接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
  */
 export function SettingsPage({
   settings,

@@ -74,6 +74,7 @@ pub fn run() {
             // 无感接管：状态查询 / 立即停止 / 最近路由
             stealth::stealth_status,
             stealth::stealth_stop,
+            stealth::takeover_events,
             proxy::proxy_routes,
         ])
         .build(tauri::generate_context!())

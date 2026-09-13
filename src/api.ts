@@ -12,6 +12,7 @@ import type {
   NetRestoreReport,
   StealthStatus,
   RouteLog,
+  JournalEvent,
 } from "./types";
 
 export const listAccounts = () => invoke<Account[]>("list_accounts");
@@ -120,3 +121,6 @@ export const stealthStop = () => invoke<StealthStatus>("stealth_stop");
 
 /** 反代最近若干次路由（新的在前），用来看「现在实际在用哪个账号」 */
 export const proxyRoutes = () => invoke<RouteLog[]>("proxy_routes");
+
+/** 接管事件流（新的在前）：开启 / 关闭 / 开始使用账号 / 重启 / 错误 */
+export const takeoverEvents = () => invoke<JournalEvent[]>("takeover_events");

@@ -78,10 +78,10 @@ pub struct Settings {
     /// 反代监听端口（默认 8787，避开 Clash 的 7897）
     #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
-    /// 优先扣费账号：设置后反代路由坚决用它（覆盖粘滞与智能轮换），用于定向测试扣费。
-    /// None = 自动（粘滞 + 最旧积分优先）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_account_id: Option<String>,
+    /// 扣费备选账号（多选）：反代只在这批账号里选号扣费，**未选中的账号不允许扣费**。
+    /// 空 = 全部账号都可作为备选（智能轮换）。
+    #[serde(default)]
+    pub billing_account_ids: Vec<String>,
     /// 多账号风控预防：批量签到时在账号之间加入随机间隔，避免同一 IP 瞬时连发多账号请求。
     #[serde(default = "default_true")]
     pub stagger_checkin: bool,
@@ -103,7 +103,7 @@ impl Default for Settings {
             notify_on_manual: false,
             proxy_enabled: false,
             proxy_port: default_proxy_port(),
-            preferred_account_id: None,
+            billing_account_ids: Vec::new(),
             stagger_checkin: true,
             stagger_max_seconds: default_stagger_max(),
         }
@@ -247,17 +247,14 @@ mod tests {
         // 定时推送默认开、手动推送默认关
         assert!(s.notify_on_schedule);
         assert!(!s.notify_on_manual);
-        // 优先扣费账号：老配置没有 → None（自动）
-        assert!(s.preferred_account_id.is_none());
+        // 优先扣费账号：老配置没有 → 空（= 全部账号都可作为备选）
+        assert!(s.billing_account_ids.is_empty());
     }
 
     #[test]
-    fn preferred_account_roundtrips_and_normalizes() {
+    fn legacy_preferred_account_field_is_ignored() {
+        // 旧版单选字段不再使用：读到也不影响新逻辑（多选列表仍为空 = 全部可用）
         let s: Settings = serde_json::from_str(r#"{"preferred_account_id":"abc"}"#).unwrap();
-        assert_eq!(s.preferred_account_id.as_deref(), Some("abc"));
-        // 反序列化时未知账号 id 不拦（选号时按 position 找不到就自动降级），
-        // 空串由 normalize_settings 归一为 None，这里验证 serde 层不做多余加工
-        let s2: Settings = serde_json::from_str(r#"{"preferred_account_id":""}"#).unwrap();
-        assert_eq!(s2.preferred_account_id.as_deref(), Some(""));
+        assert!(s.billing_account_ids.is_empty());
     }
 }

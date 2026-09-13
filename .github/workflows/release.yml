@@ -77,8 +77,13 @@ jobs:
           mkdir -p assets && cd assets
           gh release download "$TAG" --repo "$REPO" --clobber
 
+          # latest.json 不信任 tauri-action 的产出：两个平台 job 会互相覆盖，
+          # 实测 v0.1.0 的 latest.json 只剩 windows 平台，macOS 端「检查更新」直接报
+          # "None of the fallback platforms" 。这里从改名后的产物 + .sig 签名文件
+          # 全量重建，平台覆盖以实际存在的安装包为准（签名只覆盖文件内容，改名无影响）。
           python3 - <<'PY'
           import json, os, subprocess
+          from datetime import datetime, timezone
 
           tag, repo = os.environ["TAG"], os.environ["REPO"]
           mapping = {}
@@ -95,14 +100,50 @@ jobs:
               if new != f:
                   os.rename(f, new)
                   mapping[f] = new
-
-          # latest.json 里的下载 URL 同步改成新文件名
-          text = open("latest.json").read()
-          for old, new in mapping.items():
-              text = text.replace(old, new)
-          json.loads(text)  # 改完必须仍是合法 JSON
-          open("latest.json", "w").write(text)
           print("renamed:", json.dumps(mapping, indent=2))
+
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+          files = set(os.listdir("."))
+          platforms = {}
+
+          def add(key, artifact):
+              sig = artifact + ".sig"
+              if artifact in files and sig in files:
+                  platforms[key] = {
+                      "signature": open(sig).read().strip(),
+                      "url": f"{base}/{artifact}",
+                  }
+
+          for f in sorted(files):
+              if f.endswith(".app.tar.gz"):
+                  arch = "aarch64" if "_aarch64" in f else ("x86_64" if "_x86_64" in f else None)
+                  if arch:
+                      add(f"darwin-{arch}", f)
+          msi = next((f for f in sorted(files) if f.endswith(".msi")), None)
+          nsis = next((f for f in sorted(files) if f.endswith("-setup.exe")), None)
+          if msi:
+              add("windows-x86_64", msi)
+              add("windows-x86_64-msi", msi)
+          if nsis:
+              add("windows-x86_64-nsis", nsis)
+
+          if not platforms:
+              raise SystemExit("没有任何可用的更新产物，拒绝发布")
+
+          old = {}
+          if os.path.exists("latest.json"):
+              try:
+                  old = json.load(open("latest.json"))
+              except Exception:
+                  pass
+          manifest = {
+              "version": tag.lstrip("v"),
+              "notes": old.get("notes", "自动构建的桌面安装包（macOS / Windows）。"),
+              "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
+          }
+          json.dump(manifest, open("latest.json", "w"), ensure_ascii=False, indent=2)
+          print("platforms:", list(platforms.keys()))
 
           # 删除 Release 上的旧资产（本地已有全量副本，改名后整体重传）
           releases = json.loads(subprocess.check_output(

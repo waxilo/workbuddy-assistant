@@ -684,11 +684,14 @@ fn normalize_settings(mut settings: Settings) -> Result<Settings, String> {
     settings.notify_webhook = settings.notify_webhook.trim().to_string();
     // 风控间隔上限：钳制到合理区间，防手滑填 0（退化成无间隔）或填超大值
     settings.stagger_max_seconds = settings.stagger_max_seconds.clamp(2, 600);
-    // 优先扣费账号：空串统一归一成 None（= 自动），选号逻辑只认 None / 有效 id
-    settings.preferred_account_id = settings
-        .preferred_account_id
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    // 扣费备选账号：去空格、去空项、去重，保持原有顺序（多选池；空 = 全部可用）
+    let mut seen = std::collections::HashSet::new();
+    settings.billing_account_ids = settings
+        .billing_account_ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty() && seen.insert(id.clone()))
+        .collect();
     if settings.notify_enabled && settings.notify_webhook.is_empty() {
         return Err("已开启签到通知，请填写 webhook 地址".into());
     }

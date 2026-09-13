@@ -53,6 +53,18 @@ body {
   align-items: center;
   gap: 10px;
   padding: 0 6px;
+  min-width: 0;
+}
+.brand h1 {
+  font-size: 15px;
+  margin: 0;
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+.brand .sub {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
 }
 .nav {
   display: flex;
@@ -116,7 +128,7 @@ body {
   align-items: center;
   gap: 10px;
   padding: 12px 22px;
-  background: var(--bg);
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
 .pagebar h2 {
@@ -130,24 +142,17 @@ body {
   gap: 12px;
 }
 .logo {
-  width: 38px;
-  height: 38px;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
   border-radius: 10px;
   display: grid;
   place-items: center;
-  background: var(--primary);
+  background: linear-gradient(135deg, #4d7cff, #2f57d6);
   color: #fff;
-  font-size: 20px;
+  font-size: 19px;
   font-weight: 700;
-}
-.brand h1 {
-  font-size: 16px;
-  margin: 0;
-}
-.sub {
-  margin: 2px 0 0;
-  font-size: 12px;
-  color: var(--muted);
+  box-shadow: 0 2px 6px rgba(59, 108, 255, 0.35);
 }
 
 .spacer {
@@ -242,6 +247,11 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 14px 16px;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.account-card:hover {
+  border-color: #c9d2e3;
+  box-shadow: 0 2px 10px rgba(31, 37, 51, 0.05);
 }
 /* 列表尾部「再收一个账号」的引导行 */
 .ac-more {
@@ -942,4 +952,256 @@ body {
 .log-list .log-name {
   font-weight: 600;
   font-size: 13px;
+}
+
+/* ── 无感接管页 ─────────────────────────────────────────────── */
+
+.tk-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* 顶部开关卡 */
+.tk-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+.tk-hero.live {
+  border-color: #b9e4cc;
+  background: linear-gradient(180deg, #f2fbf6, #ffffff);
+}
+.tk-hero-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.tk-hero-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tk-hero-text strong {
+  font-size: 15px;
+}
+.tk-hero-sub {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.tk-hero-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tk-port {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 !important;
+}
+.tk-port input {
+  width: 86px !important;
+  margin: 0 !important;
+  padding: 6px 9px !important;
+}
+
+/* 拨动开关 */
+.switch {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch .track {
+  display: block;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  background: #d5dbe8;
+  transition: background 0.18s ease;
+}
+.switch .thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s ease;
+}
+.switch input:checked + .track {
+  background: var(--ok);
+}
+.switch input:checked + .track .thumb {
+  transform: translateX(20px);
+}
+.switch input:focus-visible + .track {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* 分区 */
+.tk-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+}
+.tk-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.tk-sec-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.tk-sec-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+.tk-section > .hint {
+  margin: 10px 0 0;
+}
+
+/* 扣费备选账号多选列表 */
+.acct-multi {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.acct-multi li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.acct-multi li:hover {
+  border-color: #c9d2e3;
+}
+.acct-multi li.picked {
+  border-color: #b9c9f7;
+  background: #f6f8ff;
+}
+.acct-multi input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.acct-multi .am-name {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.acct-multi .am-phone {
+  font-size: 12px;
+  color: var(--muted);
+}
+.acct-multi .am-state {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel-2);
+  padding: 2px 9px;
+  border-radius: 999px;
+}
+.acct-multi li.picked .am-state {
+  color: var(--primary-d);
+  background: #eaefff;
+}
+
+/* 接管动态时间线 */
+.evt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0;
+  max-height: 46vh;
+  overflow: auto;
+}
+.evt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 4px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.evt:last-child {
+  border-bottom: none;
+}
+.evt .e-at {
+  flex: 0 0 auto;
+  color: #9aa3b5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  padding-top: 1px;
+}
+.evt .e-tag {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+}
+.evt .e-detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+/* 分类配色：绿=开启，灰蓝=关闭，蓝=账号启用，红=错误 */
+.evt .tag-on {
+  color: var(--ok);
+  background: #e3f6ea;
+}
+.evt .tag-off {
+  color: var(--muted);
+  background: var(--panel-2);
+}
+.evt .tag-route {
+  color: var(--primary-d);
+  background: #eaefff;
+}
+.evt .tag-restart {
+  color: var(--warn);
+  background: #fdf3e2;
+}
+.evt .tag-err {
+  color: var(--err);
+  background: #fdecea;
+}
+.evt-err .e-detail {
+  color: var(--err);
 }
