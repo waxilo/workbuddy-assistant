@@ -391,6 +391,20 @@ export default function App() {
               )}
               <button
                 className="btn ghost"
+                title="用系统浏览器扫码登录新账号"
+                onClick={() => setModal({ type: "oauth" })}
+              >
+                登录新账号
+              </button>
+              <button
+                className="btn ghost"
+                title="读取本机 WorkBuddy 登录信息自动添加账号"
+                onClick={() => setModal({ type: "local" })}
+              >
+                导入本机账号
+              </button>
+              <button
+                className="btn ghost"
                 disabled={accounts.length === 0}
                 title="把全部账号导出为 JSON（含登录凭证），可在其他机器上导入"
                 onClick={() => void runExport()}
@@ -441,8 +455,6 @@ export default function App() {
                 setLogsInitial(id);
                 setPage("logs");
               }}
-              onLoginNew={() => setModal({ type: "oauth" })}
-              onImportLocal={() => setModal({ type: "local" })}
             />
           )}
           {page === "takeover" && settings && (

@@ -1,11 +1,11 @@
 import type { Account } from "../types";
-import { ResultBadge, formatCredits, maskPhone, maskToken } from "../common";
+import { ResultBadge, formatCredits, maskPhone } from "../common";
 
 /**
  * 首页：账号列表 + 签到操作。
  *
  * 账号**没有**「添加 / 编辑」入口：条目只是给用户看的，凭证一律来自
- * 「登录新账号」（OAuth）或「导入本机账号」（本机登录文件），避免手工粘贴 token 出错。
+ * 页头「登录新账号」（OAuth）或「导入本机账号」（本机登录文件），避免手工粘贴 token 出错。
  */
 export function AccountsPage({
   accounts,
@@ -14,8 +14,6 @@ export function AccountsPage({
   onCheckinOne,
   onRemove,
   onOpenLogs,
-  onLoginNew,
-  onImportLocal,
 }: {
   accounts: Account[];
   loading: boolean;
@@ -23,8 +21,6 @@ export function AccountsPage({
   onCheckinOne: (id: string) => void;
   onRemove: (a: Account) => void;
   onOpenLogs: (accountId: string) => void;
-  onLoginNew: () => void;
-  onImportLocal: () => void;
 }) {
   if (loading) return <p className="empty">加载中…</p>;
   if (accounts.length === 0)
@@ -47,9 +43,6 @@ export function AccountsPage({
               <span className="ac-name">{maskPhone(a.name)}</span>
               {a.phone && <span className="ac-phone">{maskPhone(a.phone)}</span>}
               <ResultBadge last={a.last} />
-            </div>
-            <div className="ac-meta">
-              <code className="tok">{maskToken(a.token)}</code>
             </div>
             <div className="ac-result">
               <span className="ac-balance">
@@ -85,17 +78,6 @@ export function AccountsPage({
           </div>
         </li>
       ))}
-      {/* 空态引导也保留操作入口（列表非空时操作在页头，这里不重复） */}
-      {accounts.length > 0 && (
-        <li className="ac-more">
-          <button className="btn ghost" onClick={onLoginNew}>
-            + 登录新账号
-          </button>
-          <button className="btn ghost" onClick={onImportLocal}>
-            + 导入本机账号
-          </button>
-        </li>
-      )}
     </ul>
   );
 }
