@@ -1,16 +1,25 @@
 :root {
-  --bg: #f5f7fb;
+  --bg: #f6f8fb;
   --panel: #ffffff;
-  --panel-2: #eef2f8;
-  --text: #1f2533;
-  --muted: #6b7385;
-  --border: #e2e7f0;
+  --panel-2: #f4f6fa;
+  --text: #1f2733;
+  --muted: #6b7488;
+  --border: #ebedf2;
+  --border-strong: #e0e4ec;
   --primary: #3b6cff;
   --primary-d: #2f57d6;
-  --ok: #1f9d55;
-  --err: #d8453b;
-  --warn: #c9821a;
-  --shadow: 0 6px 20px rgba(31, 37, 51, 0.08);
+  --primary-soft: #eef2ff;
+  --ok: #2ea36b;
+  --ok-soft: #e9f6ef;
+  --warn: #c98a2b;
+  --warn-soft: #fbf4e8;
+  --err: #d65b54;
+  --err-soft: #fceeec;
+  --radius: 10px;
+  --radius-sm: 8px;
+  --shadow-sm: 0 1px 2px rgba(20, 28, 46, 0.04);
+  --shadow: 0 4px 16px rgba(20, 28, 46, 0.06);
+  --ease: 0.16s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -25,11 +34,12 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* 布局：左侧导航栏 + 右侧内容区（分栏式） */
@@ -38,65 +48,88 @@ body {
   height: 100%;
 }
 
-/* 侧边导航栏 */
+/* 侧边导航栏：轻盈、克制，仅一条极浅右边框 */
 .sidebar {
-  flex: 0 0 200px;
+  flex: 0 0 216px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 12px;
+  gap: 16px;
+  padding: 18px 14px;
   background: var(--panel);
   border-right: 1px solid var(--border);
 }
+/* 品牌区：Logo + 名称 + 版本，清晰的三层视觉 */
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 6px;
+  gap: 11px;
+  padding: 2px 6px;
   min-width: 0;
 }
-.brand h1 {
-  font-size: 15px;
-  margin: 0;
-  white-space: nowrap;
-  letter-spacing: 0.2px;
+.logo {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #4d7cff, #2f57d6);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(59, 108, 255, 0.28);
 }
-.brand .sub {
-  margin: 2px 0 0;
-  font-size: 11.5px;
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+.brand-name {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+.brand-ver {
+  font-size: 11px;
   color: var(--muted);
+  letter-spacing: 0.2px;
 }
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   border: none;
   background: none;
   color: var(--muted);
   font-size: 13.5px;
-  padding: 9px 10px;
-  border-radius: 8px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
-  transition: background 0.12s ease, color 0.12s ease;
+  position: relative;
+  transition: background var(--ease), color var(--ease);
 }
 .nav-item:hover {
   background: var(--panel-2);
   color: var(--text);
 }
+/* 更精致的选中态：浅蓝填充 + 左侧 2px 强调条 + 字重 */
 .nav-item.active {
-  background: #eaefff;
+  background: var(--primary-soft);
   color: var(--primary-d);
   font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--primary);
 }
 .nav-icon {
   width: 18px;
-  text-align: center;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
   font-size: 14px;
 }
 /* 接管生效中的小圆点提示 */
@@ -111,8 +144,13 @@ body {
   margin-top: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   padding: 0 4px;
+}
+.side-count {
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 /* 右侧主区 */
@@ -122,37 +160,69 @@ body {
   display: flex;
   flex-direction: column;
 }
-/* 页头：标题 + 页面级操作 */
+/* 页头：标题 + 页面级操作，固定高度、紧凑 */
 .pagebar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 22px;
+  gap: 14px;
+  height: 60px;
+  flex: 0 0 auto;
+  padding: 0 24px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
-.pagebar h2 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.brand {
+.pagebar-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
-.logo {
-  flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+.pagebar-icon {
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, #4d7cff, #2f57d6);
-  color: #fff;
-  font-size: 19px;
-  font-weight: 700;
-  box-shadow: 0 2px 6px rgba(59, 108, 255, 0.35);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-soft);
+  color: var(--primary-d);
+}
+.pagebar h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+/* 状态徽标：紧凑胶囊 + 小圆点 */
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 5px 11px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.status-pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.status-pill.warn .dot {
+  background: var(--warn);
+}
+/* 操作区分组：次要按钮靠左、主操作（全部签到）权重最高 */
+.action-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .spacer {
@@ -163,60 +233,118 @@ body {
   color: var(--muted);
 }
 
-/* 按钮 */
+/* 按钮：统一层级，主操作视觉权重最高 */
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text);
   padding: 8px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
-  transition: all 0.15s ease;
+  white-space: nowrap;
+  transition: background var(--ease), border-color var(--ease), color var(--ease),
+    box-shadow var(--ease);
 }
-.btn:hover {
-  border-color: #c9d2e3;
+.btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--panel-2);
 }
 .btn:disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .btn.primary {
   background: var(--primary);
   border-color: var(--primary);
   color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(47, 87, 214, 0.25);
 }
-.btn.primary:hover {
+.btn.primary:hover:not(:disabled) {
   background: var(--primary-d);
+  border-color: var(--primary-d);
 }
 .btn.ghost {
   background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.btn.ghost:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: transparent;
 }
 .btn.danger {
   color: var(--err);
+  border-color: var(--border);
+}
+.btn.danger:hover:not(:disabled) {
+  background: var(--err-soft);
   border-color: #f0c4c0;
 }
-.btn.danger:hover {
-  background: #fdecea;
+.btn-sm {
+  padding: 7px 12px;
+  font-size: 12.5px;
 }
-.btn.small {
-  padding: 5px 10px;
-  font-size: 12px;
+.btn.block {
+  width: 100%;
+}
+/* 图标按钮（日志 / 删除等轻量操作，高度 32px） */
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--ease), color var(--ease), border-color var(--ease);
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+.icon-btn.icon-danger:hover:not(:disabled) {
+  background: var(--err-soft);
+  color: var(--err);
+  border-color: #f0c4c0;
+}
+/* 加载转圈 */
+.spin {
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-/* 内容区 */
+/* 内容区：自适应铺满，纵向滚动 */
 .content {
   flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding: 18px 22px;
+  padding: 20px 24px 28px;
 }
-/* 页面内容统一限宽，避免宽屏下拉伸过散 */
+/* 页面内容限宽，避免超宽屏拉伸过散（账号页等除外，自适应铺满） */
 .panel-page {
-  max-width: 760px;
+  max-width: 960px;
+  margin: 0 auto;
 }
 /* 签到日志页需要更宽，以便单条日志左右两栏都不空洞 */
 .panel-page.logs-page {
   max-width: none;
+  margin: 0;
 }
 /* 页面底部操作区（保存等） */
 .page-actions {
@@ -235,107 +363,215 @@ body {
   margin-top: 60px;
 }
 
-/* 账号列表：表格样式 */
+/* 账号页：轻量统计概览（不抢内容、不撑高） */
+.ac-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+.sum-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  box-shadow: var(--shadow-sm);
+}
+.sum-label {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.sum-num {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.sum-num.ok {
+  color: var(--ok);
+}
+
+/* 账号表格：整行轻分隔线 + Hover 微变，不做独立卡片 */
+.table-wrap {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
 .account-table {
   width: 100%;
   border-collapse: collapse;
   border-spacing: 0;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
-  font-size: 13px;
+  font-size: 13.5px;
 }
-.account-table thead {
-  background: var(--panel-2);
-}
-.account-table th {
-  padding: 11px 14px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
+.account-table thead th {
+  height: 44px;
+  padding: 0 18px;
   text-align: left;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+  background: #fafbfd;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
-.account-table th:last-child,
-.account-table td:last-child {
+.account-table th.col-actions,
+.account-table td.col-actions {
   text-align: right;
 }
-.account-row {
-  transition: background 0.1s ease;
-}
-.account-row:hover {
-  background: #f8fafd;
-}
 .account-row td {
-  padding: 12px 14px;
+  height: 68px;
+  padding: 0 18px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
 .account-row:last-child td {
   border-bottom: none;
 }
-.ac-cell-name {
-  min-width: 0;
+.account-row {
+  transition: background var(--ease);
 }
-.ac-cell-name .ac-title {
+.account-row:hover td {
+  background: #fafbfe;
+}
+/* 账号列：头像 + 名称 + 手机号 */
+.ac-cell-name {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
+  gap: 12px;
 }
-.ac-name {
-  font-weight: 600;
-  font-size: 15px;
-}
-/* 手机号：账号主标识之一，做成明显的胶囊 */
-.ac-phone {
-  font-size: 12px;
-  font-weight: 600;
-  color: #0f766e;
-  background: #e6fbf7;
-  border: 1px solid #bdeee5;
-  padding: 2px 9px;
-  border-radius: 999px;
-  letter-spacing: 0.3px;
-}
-.tag {
-  font-size: 11px;
+.ac-avatar {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: var(--primary-soft);
   color: var(--primary-d);
-  background: #eaefff;
-  padding: 2px 8px;
-  border-radius: 999px;
-  white-space: nowrap;
-}
-.ac-cell-balance {
-  white-space: nowrap;
-}
-/* 积分余额：需要在条目上突出显示 */
-.ac-balance {
-  color: #b45309;
+  font-size: 14px;
   font-weight: 600;
 }
-.ac-cell-last {
+.ac-id {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  color: var(--muted);
-  font-size: 12px;
+  min-width: 0;
 }
-.ac-cell-last .msg {
+.ac-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+/* 手机号：弱化的次级信息 */
+.ac-phone {
+  font-size: 12px;
+  color: var(--muted);
+}
+/* 积分：核心数据突出，低积分用弱橙提示 */
+.ac-balance {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.ac-balance.low {
+  color: var(--warn);
+}
+/* 最近签到：相对时间为主，完整时间作辅助并带 Tooltip */
+.ac-last {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ac-last-main {
+  font-size: 13px;
   color: var(--text);
 }
-.ac-cell-last .ac-credit {
-  color: var(--ok);
-  font-weight: 600;
+.ac-last-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
+/* 状态：圆点 + 文字，克制配色 */
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.status-dot .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
+}
+.status-dot.done {
+  color: var(--ok);
+}
+.status-dot.done .dot {
+  background: var(--ok);
+}
+.status-dot.pending .dot {
+  background: #b9c0cd;
+}
+.status-dot.fail {
+  color: var(--err);
+}
+.status-dot.fail .dot {
+  background: var(--err);
+}
+.status-dot.inactive .dot {
+  background: #c2c8d4;
+}
+.status-dot.signing .dot {
+  background: var(--primary);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(59, 108, 255, 0.22);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(59, 108, 255, 0);
+  }
+}
+/* 操作列：签到 + 图标按钮 */
 .ac-cell-actions {
   white-space: nowrap;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   justify-content: flex-end;
   align-items: center;
+}
+/* 兼容旧 tag（如日志页） */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--primary-d);
+  background: var(--primary-soft);
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.muted {
+  color: var(--muted);
 }
 
 /* 徽标 */
@@ -569,6 +805,22 @@ body {
   font-size: 13px;
   color: var(--text);
 }
+/* 导入本机账号 / 登录结果里的 token 预览（保留，便于核对凭证） */
+.ac-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.ac-meta code.tok {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel-2);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 /* 自研确认框（替代 window.confirm） */
 .confirm-mask {
@@ -782,15 +1034,27 @@ body {
 /* toast（唯一通知出口：所有提示都走顶部 toast） */
 .toast {
   position: fixed;
-  top: 18px;
+  top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  padding: 10px 18px;
-  border-radius: 10px;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
+  font-weight: 500;
   color: #fff;
   z-index: 70;
-  box-shadow: var(--shadow);
+  box-shadow: 0 6px 20px rgba(20, 28, 46, 0.18);
+  animation: toast-in 0.18s ease;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 .toast-ok {
   background: var(--ok);

@@ -1,5 +1,29 @@
 import type { Account } from "../types";
-import { ResultBadge, formatCredits, maskPhone } from "../common";
+import {
+  formatCredits,
+  maskPhone,
+  relativeTime,
+  signState,
+  type SignState,
+} from "../common";
+import { IconFile, IconTrash, IconUser, IconRefresh } from "../components/Icons";
+
+const STATUS_LABEL: Record<SignState, string> = {
+  signing: "签到中",
+  done: "今日已签到",
+  pending: "待签到",
+  fail: "签到失败",
+  inactive: "活动未开",
+};
+
+function StatusDot({ state }: { state: SignState }) {
+  return (
+    <span className={`status-dot ${state}`}>
+      <i className="dot" />
+      <span>{STATUS_LABEL[state]}</span>
+    </span>
+  );
+}
 
 /**
  * 首页：账号列表 + 签到操作。
@@ -34,68 +58,119 @@ export function AccountsPage({
       </div>
     );
 
+  const total = accounts.length;
+  const done = accounts.filter((a) => signState(a, false) === "done").length;
+  const pending = total - done;
+  const rate = total > 0 ? Math.round((done / total) * 100) : 0;
+
   return (
-    <table className="account-table">
-      <thead>
-        <tr>
-          <th>账号</th>
-          <th>剩余积分</th>
-          <th>最近签到</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {accounts.map((a) => (
-          <tr key={a.id} className="account-row">
-            <td className="ac-cell-name">
-              <div className="ac-title">
-                <span className="ac-name">{maskPhone(a.name)}</span>
-                {a.phone && <span className="ac-phone">{maskPhone(a.phone)}</span>}
-              </div>
-              <ResultBadge last={a.last} />
-            </td>
-            <td className="ac-cell-balance">
-              {a.last?.balance != null ? (
-                <span className="ac-balance">{formatCredits(a.last.balance)}</span>
-              ) : (
-                <span className="muted">—</span>
-              )}
-            </td>
-            <td className="ac-cell-last">
-              {a.last?.at && <span>{a.last.at}</span>}
-              {a.last?.streak != null && (
-                <span className="muted">连续 {a.last.streak} 天</span>
-              )}
-              {a.last?.credit != null && (
-                <span className="ac-credit">+{a.last.credit}</span>
-              )}
-              {/* 「今日已签」的文案与徽标重复，不再展示；失败原因仍要显示 */}
-              {a.last?.message && !a.last.already && (
-                <span className="msg">{a.last.message}</span>
-              )}
-            </td>
-            <td className="ac-cell-actions">
-              <button
-                className="btn small"
-                disabled={busyIds.has(a.id)}
-                onClick={() => onCheckinOne(a.id)}
-              >
-                {busyIds.has(a.id) ? "…" : "签到"}
-              </button>
-              <button
-                className="btn small ghost"
-                onClick={() => onOpenLogs(a.id)}
-              >
-                日志
-              </button>
-              {/* 续签不提供手动按钮：签到前与后台扫描会自动完成（剩余有效期不足 48h） */}
-              <button className="btn small danger" onClick={() => onRemove(a)}>
-                删除
-              </button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="ac-page">
+      <div className="summary">
+        <div className="sum-card">
+          <span className="sum-label">账号总数</span>
+          <span className="sum-num">{total}</span>
+        </div>
+        <div className="sum-card">
+          <span className="sum-label">今日已签到</span>
+          <span className="sum-num ok">{done}</span>
+        </div>
+        <div className="sum-card">
+          <span className="sum-label">待签到</span>
+          <span className="sum-num">{pending}</span>
+        </div>
+        <div className="sum-card">
+          <span className="sum-label">签到成功率</span>
+          <span className="sum-num">{rate}%</span>
+        </div>
+      </div>
+
+      <div className="table-wrap">
+        <table className="account-table">
+          <thead>
+            <tr>
+              <th>账号</th>
+              <th>剩余积分</th>
+              <th>最近签到</th>
+              <th>状态</th>
+              <th className="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map((a) => {
+              const busy = busyIds.has(a.id);
+              const st = signState(a, busy);
+              const low = a.last?.balance != null && a.last.balance < 100;
+              const initial = /^\d/.test(a.name) ? null : a.name.slice(0, 1);
+              return (
+                <tr key={a.id} className="account-row">
+                  <td className="ac-cell-name">
+                    <span className="ac-avatar">
+                      {initial ? initial : <IconUser size={16} />}
+                    </span>
+                    <div className="ac-id">
+                      <span className="ac-name">{maskPhone(a.name)}</span>
+                      {a.phone && <span className="ac-phone">{maskPhone(a.phone)}</span>}
+                    </div>
+                  </td>
+                  <td className="ac-cell-balance">
+                    {a.last?.balance != null ? (
+                      <span className={"ac-balance" + (low ? " low" : "")}>
+                        {formatCredits(a.last.balance)}
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td className="ac-cell-last">
+                    {a.last?.at ? (
+                      <div className="ac-last">
+                        <span className="ac-last-main">{relativeTime(a.last.at)}</span>
+                        <span className="ac-last-sub" title={a.last.at}>
+                          {a.last.at.slice(11, 16)}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td className="ac-cell-status">
+                    <StatusDot state={st} />
+                  </td>
+                  <td className="ac-cell-actions">
+                    <button
+                      className="btn btn-sm btn-primary"
+                      disabled={busy}
+                      onClick={() => onCheckinOne(a.id)}
+                    >
+                      {busy ? (
+                        <>
+                          <IconRefresh size={14} className="spin" /> 签到中
+                        </>
+                      ) : (
+                        "签到"
+                      )}
+                    </button>
+                    <button
+                      className="icon-btn"
+                      title="查看签到日志"
+                      onClick={() => onOpenLogs(a.id)}
+                    >
+                      <IconFile size={16} />
+                    </button>
+                    <button
+                      className="icon-btn icon-danger"
+                      title="删除账号"
+                      onClick={() => onRemove(a)}
+                    >
+                      <IconTrash size={16} />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { Account, ImportItem, ImportReport, Settings } from "./types";
@@ -22,6 +22,17 @@ import { TakeoverPage } from "./pages/TakeoverPage";
 import { NetfixPage } from "./pages/NetfixPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import {
+  IconCheck,
+  IconSwap,
+  IconActivity,
+  IconList,
+  IconGear,
+  IconUserPlus,
+  IconDownload,
+  IconUpload,
+  IconRefresh,
+} from "./components/Icons";
 import { LocalAccountsModal, OAuthModal } from "./components/ImportModals";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 
@@ -35,13 +46,21 @@ type Page = "accounts" | "takeover" | "netfix" | "logs" | "settings";
 
 type Modal = { type: "local" } | { type: "oauth" } | null;
 
-const NAV: { key: Page; label: string; icon: string }[] = [
-  { key: "accounts", label: "账号签到", icon: "✓" },
-  { key: "takeover", label: "智能接管", icon: "⇄" },
-  { key: "netfix", label: "网络急救", icon: "✚" },
-  { key: "logs", label: "签到日志", icon: "☰" },
-  { key: "settings", label: "设置", icon: "⚙" },
+const NAV: { key: Page; label: string }[] = [
+  { key: "accounts", label: "账号签到" },
+  { key: "takeover", label: "智能接管" },
+  { key: "netfix", label: "网络急救" },
+  { key: "logs", label: "签到日志" },
+  { key: "settings", label: "设置" },
 ];
+
+const PAGE_ICON: Record<Page, ReactNode> = {
+  accounts: <IconCheck />,
+  takeover: <IconSwap />,
+  netfix: <IconActivity />,
+  logs: <IconList />,
+  settings: <IconGear />,
+};
 
 const PAGE_TITLES: Record<Page, string> = {
   accounts: "账号签到",
@@ -335,10 +354,12 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="logo">✓</span>
-          <div>
-            <h1>WorkBuddy 助手</h1>
-            <p className="sub">v{version}</p>
+          <span className="logo">
+            <IconCheck size={18} />
+          </span>
+          <div className="brand-text">
+            <span className="brand-name">WorkBuddy 助手</span>
+            <span className="brand-ver">v{version}</span>
           </div>
         </div>
 
@@ -353,7 +374,7 @@ export default function App() {
                 if (n.key === "logs") setLogsInitial(null);
               }}
             >
-              <span className="nav-icon">{n.icon}</span>
+              <span className="nav-icon">{PAGE_ICON[n.key]}</span>
               {n.label}
               {n.key === "takeover" && settings?.proxy_enabled && (
                 <span className="nav-dot" title="接管生效中" />
@@ -363,80 +384,108 @@ export default function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <button className="btn ghost" onClick={onUpdate}>
+          <button className="btn ghost block" onClick={onUpdate}>
             检查更新
           </button>
-          <span className="count">共 {accounts.length} 个账号</span>
+          <div className="side-count">共 {accounts.length} 个账号</div>
         </div>
       </aside>
 
       <div className="main">
         <header className="pagebar">
-          <h2>{PAGE_TITLES[page]}</h2>
+          <div className="pagebar-left">
+            <span className="pagebar-icon">{PAGE_ICON[page]}</span>
+            <h2>{PAGE_TITLES[page]}</h2>
+          </div>
           <span className="spacer" />
           {page === "accounts" && (
             <>
-              {settings?.schedule_enabled && (
-                <span className="tag" title="应用保持运行时才会触发；可在「设置」里修改">
-                  每日 {settings.schedule_time} 自动签到
-                </span>
-              )}
-              {settings?.stagger_checkin && settings.stagger_max_seconds > 0 && (
-                <span
-                  className="tag"
-                  title="批量签到时账号之间随机间隔，降低同 IP 触发风控的概率"
+              <div className="status-group">
+                {settings?.schedule_enabled && (
+                  <span
+                    className="status-pill"
+                    title="应用保持运行时才会触发；可在「设置」里修改"
+                  >
+                    <i className="dot" />
+                    每日 {settings.schedule_time} 自动签到
+                  </span>
+                )}
+                {settings?.stagger_checkin && settings.stagger_max_seconds > 0 && (
+                  <span
+                    className="status-pill warn"
+                    title="批量签到时账号之间随机间隔，降低同 IP 触发风控的概率"
+                  >
+                    <i className="dot" />
+                    风控间隔 ≤{settings.stagger_max_seconds}s
+                  </span>
+                )}
+              </div>
+              <div className="action-group">
+                <button
+                  className="btn ghost"
+                  title="用系统浏览器扫码登录新账号"
+                  onClick={() => setModal({ type: "oauth" })}
                 >
-                  风控间隔 ≤{settings.stagger_max_seconds}s
-                </span>
-              )}
-              <button
-                className="btn ghost"
-                title="用系统浏览器扫码登录新账号"
-                onClick={() => setModal({ type: "oauth" })}
-              >
-                登录新账号
-              </button>
-              <button
-                className="btn ghost"
-                title="读取本机 WorkBuddy 登录信息自动添加账号"
-                onClick={() => setModal({ type: "local" })}
-              >
-                导入本机账号
-              </button>
-              <button
-                className="btn ghost"
-                disabled={accounts.length === 0}
-                title="把全部账号导出为 JSON（含登录凭证），可在其他机器上导入"
-                onClick={() => void runExport()}
-              >
-                导出
-              </button>
-              <button
-                className="btn ghost"
-                title="从导出的 JSON 文件导入账号（按手机号/token 合并）"
-                onClick={() => void runImportFile()}
-              >
-                导入
-              </button>
-              <button
-                className="btn ghost"
-                disabled={busyRefresh || accounts.length === 0}
-                title="查询全部账号的最新剩余积分，不触发签到"
-                onClick={runRefresh}
-              >
-                {busyRefresh ? "刷新中…" : "刷新"}
-              </button>
-              <button
-                className="btn primary"
-                disabled={busyAll || accounts.length === 0}
-                onClick={runCheckinAll}
-              >
-                {busyAll ? "签到中…" : "全部签到"}
-              </button>
+                  <IconUserPlus size={15} />
+                  登录新账号
+                </button>
+                <button
+                  className="btn ghost"
+                  title="读取本机 WorkBuddy 登录信息自动添加账号"
+                  onClick={() => setModal({ type: "local" })}
+                >
+                  导入本机账号
+                </button>
+                <button
+                  className="btn ghost"
+                  disabled={accounts.length === 0}
+                  title="把全部账号导出为 JSON（含登录凭证），可在其他机器上导入"
+                  onClick={() => void runExport()}
+                >
+                  <IconDownload size={15} />
+                  导出
+                </button>
+                <button
+                  className="btn ghost"
+                  title="从导出的 JSON 文件导入账号（按手机号/token 合并）"
+                  onClick={() => void runImportFile()}
+                >
+                  <IconUpload size={15} />
+                  导入
+                </button>
+                <button
+                  className="btn ghost"
+                  disabled={busyRefresh || accounts.length === 0}
+                  title="查询全部账号的最新剩余积分，不触发签到"
+                  onClick={runRefresh}
+                >
+                  {busyRefresh ? (
+                    <>
+                      <IconRefresh size={15} className="spin" />
+                      刷新中
+                    </>
+                  ) : (
+                    <>
+                      <IconRefresh size={15} />
+                      刷新
+                    </>
+                  )}
+                </button>
+                <button
+                  className="btn primary"
+                  disabled={busyAll || accounts.length === 0}
+                  onClick={runCheckinAll}
+                >
+                  {busyAll ? "签到中…" : "全部签到"}
+                </button>
+              </div>
             </>
           )}
           {page === "logs" && (
-            <span className="tag">按账号筛选查看签到记录</span>
+            <span className="status-pill">
+              <IconList size={14} />
+              按账号筛选查看签到记录
+            </span>
           )}
         </header>
 

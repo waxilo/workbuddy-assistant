@@ -1,4 +1,4 @@
-import type { CheckinLog } from "./types";
+import type { Account, CheckinLog } from "./types";
 
 /**
  * 跨页面共享的 UI 基础件：类型、展示助手与状态徽标。
@@ -41,6 +41,54 @@ export function maskPhone(s: string): string {
 /// 名称本身是手机号时同样脱敏；过滤/匹配请直接用原始字段，不要经过这里。
 export function accountLabel(name: string, phone?: string | null): string {
   return phone ? `${maskPhone(name)}（${maskPhone(phone)}）` : maskPhone(name);
+}
+
+/** 解析「YYYY-MM-DD HH:MM:SS」为 Date；格式不符返回 null */
+function parseAt(at?: string | null): Date | null {
+  if (!at) return null;
+  const d = new Date(at.replace(" ", "T"));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** 相对时间：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / 日期（用于「最近签到」主信息） */
+export function relativeTime(at?: string | null): string {
+  const d = parseAt(at);
+  if (!d) return "";
+  const diff = Date.now() - d.getTime();
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day === 1) return "昨天";
+  if (day < 7) return `${day} 天前`;
+  return at!.slice(0, 10);
+}
+
+/** 是否为今天（本地时区） */
+export function isToday(at?: string | null): boolean {
+  const d = parseAt(at);
+  if (!d) return false;
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
+
+export type SignState = "signing" | "done" | "pending" | "fail" | "inactive";
+
+/** 账号签到状态：用于状态列徽标 + 顶部统计卡片（busy 优先于一切） */
+export function signState(a: Account, busy: boolean): SignState {
+  if (busy) return "signing";
+  const r = a.last;
+  if (!r) return "pending";
+  if (r.already) return "done";
+  if (r.success) return isToday(r.at) ? "done" : "pending";
+  if (r.inactive) return "inactive";
+  return "fail";
 }
 
 /** 一批签到结果的互斥计数（成功 / 已签 / 失败），避免「已签」被重复算成「成功」 */
