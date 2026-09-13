@@ -45,7 +45,7 @@ const NAV: { key: Page; label: string; icon: string }[] = [
 
 const PAGE_TITLES: Record<Page, string> = {
   accounts: "账号签到",
-  takeover: "无感接管（WorkBuddy 专用）",
+  takeover: "无感接管",
   netfix: "网络急救",
   logs: "签到日志",
   settings: "设置",
