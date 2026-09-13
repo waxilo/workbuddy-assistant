@@ -113,5 +113,5 @@ jobs:
                               f"repos/{repo}/releases/assets/{a['id']}"], check=True)
           PY
 
-          gh release upload "$TAG" assets/* --repo "$REPO" --clobber
+          gh release upload "$TAG" ./* --repo "$REPO" --clobber
           gh release edit "$TAG" --repo "$REPO" --draft=false --latest
