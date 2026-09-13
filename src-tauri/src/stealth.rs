@@ -264,6 +264,12 @@ pub fn install(home: &Path, data_dir: &Path, port: u16) -> Result<(), String> {
 /// 安全起见：只有当配置里的值**仍是我们写进去的那个**才动手；
 /// 被别人改过就不碰，避免把用户的配置改坏。
 pub fn uninstall(home: &Path, data_dir: &Path) -> Result<(), String> {
+    uninstall_with_note(home, data_dir, None)
+}
+
+/// 同 [`uninstall`]，但在关闭事件里追加一句备注（如「已重启 WorkBuddy 清除长驻
+/// CLI host 环境」），避免同一动作拆成两条同秒事件刷屏。
+pub fn uninstall_with_note(home: &Path, data_dir: &Path, note: Option<&str>) -> Result<(), String> {
     let lease = load_lease(data_dir);
     let path = target_config(home);
     if !path.exists() {
@@ -290,7 +296,11 @@ pub fn uninstall(home: &Path, data_dir: &Path) -> Result<(), String> {
         _ => {}
     }
     if changed {
-        journal_append(data_dir, "uninstall", "接管已关闭：端点已从 WorkBuddy 配置摘除，WorkBuddy 恢复直连");
+        let detail = match note {
+            Some(n) => format!("接管已关闭：端点已从 WorkBuddy 配置摘除，WorkBuddy 恢复直连；{n}"),
+            None => "接管已关闭：端点已从 WorkBuddy 配置摘除，WorkBuddy 恢复直连".to_string(),
+        };
+        journal_append(data_dir, "uninstall", &detail);
     }
     let _ = fs::remove_file(lease_path(data_dir));
     Ok(())

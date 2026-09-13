@@ -739,7 +739,8 @@ pub(crate) fn apply_settings_inner(app: &AppHandle, settings: Settings) -> Resul
             }
         }
         (true, false) => {
-            crate::stealth::uninstall(&home, &dir)?;
+            let note = was_running.then_some("已重启 WorkBuddy 清除长驻 CLI host 环境");
+            crate::stealth::uninstall_with_note(&home, &dir, note)?;
             if was_running {
                 if let Err(e) = quit_workbuddy_and_wait() {
                     let _ = crate::stealth::install(&home, &dir, old.proxy_port);
@@ -755,11 +756,11 @@ pub(crate) fn apply_settings_inner(app: &AppHandle, settings: Settings) -> Resul
             }
             if was_running {
                 open_workbuddy()?;
-                crate::stealth::journal_append(&dir, "restart_workbuddy", "关闭接管后已清除长驻 CLI host 环境");
             }
         }
         (true, true) => {
-            crate::stealth::uninstall(&home, &dir)?;
+            let note = was_running.then_some("已重启 WorkBuddy 切换端口并清除长驻 CLI host 环境");
+            crate::stealth::uninstall_with_note(&home, &dir, note)?;
             if was_running {
                 if let Err(e) = quit_workbuddy_and_wait() {
                     let _ = crate::stealth::install(&home, &dir, old.proxy_port);
@@ -777,7 +778,6 @@ pub(crate) fn apply_settings_inner(app: &AppHandle, settings: Settings) -> Resul
             }
             if was_running {
                 open_workbuddy()?;
-                crate::stealth::journal_append(&dir, "restart_workbuddy", "换端口后已清除长驻 CLI host 环境");
             }
         }
         (false, false) => unreachable!(),
