@@ -210,7 +210,7 @@ async fn run_once(app: &AppHandle, settings: &Settings, dir: &Path) {
     let _ = app.emit(EVENT, serde_json::json!({ "stage": "start" }));
 
     let notify_on = settings.notify_enabled && settings.notify_on_schedule;
-    match commands::checkin_all_inner(app).await {
+    match commands::checkin_all_inner(app, true).await {
         Ok(accounts) => {
             // 与 notify 一致：「已签」与「成功」互斥计数（已签的响应 success 也是 true）
             let already = accounts.iter().filter(|a| matches!(&a.last, Some(r) if r.already)).count();

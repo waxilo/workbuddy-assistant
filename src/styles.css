@@ -999,6 +999,23 @@ body {
   max-height: none;
 }
 
+/* 接管动态顶部的实时扣费备选池状态（与下面的历史事件区分） */
+.tk-pool {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: rgba(59, 108, 255, 0.08);
+  border: 1px solid rgba(59, 108, 255, 0.2);
+}
+.tk-pool b {
+  color: var(--primary);
+  font-size: 13px;
+  margin: 0 1px;
+}
+
 /* 拨动开关 */
 .switch {
   position: relative;

@@ -339,6 +339,16 @@ export function TakeoverPage({
             清空
           </button>
         </div>
+        {live && (
+          <div className="tk-pool" title="实时反映当前扣费备选池，与下面的历史事件无关">
+            当前扣费备选：<b>{effective.length}</b> 个
+            {billing.length === 0
+              ? " · 默认全选（新增账号自动纳入）"
+              : ` · ${effective
+                  .map((id) => accounts.find((a) => a.id === id)?.name ?? id)
+                  .join("、")}`}
+          </div>
+        )}
         {events.length === 0 ? (
           <p className="hint">
             暂无事件。开启接管并产生对话后，这里会记录每一次账号启用与开关动作。

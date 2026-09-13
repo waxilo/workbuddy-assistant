@@ -460,7 +460,8 @@ pub async fn checkin_one(app: AppHandle, id: String) -> Result<Account, String> 
 pub async fn checkin_all(app: AppHandle) -> Result<Vec<Account>, String> {
     let dir = data_dir(&app);
     let settings = accounts::load_settings(&dir);
-    let results = checkin_all_inner(&app).await?;
+    // 手动「全部签到」不启用风控间隔：用户主动触发，期望尽快完成
+    let results = checkin_all_inner(&app, false).await?;
     // 手动批量签到是否推送由设置决定（默认关，免得连点几下就把通知刷屏）
     if settings.notify_enabled && settings.notify_on_manual {
         let _ = notify::send(&settings.notify_webhook, &notify::summary_message(&results)).await;
@@ -498,7 +499,14 @@ pub async fn refresh_all_credits(app: AppHandle) -> Result<Vec<Account>, String>
 ///
 /// 抽成独立函数是因为定时调度（`scheduler`）与手动命令共用同一套逻辑——
 /// 后台线程走不了 Tauri 的 invoke，只能直接调它。
-pub(crate) async fn checkin_all_inner(app: &AppHandle) -> Result<Vec<Account>, String> {
+///
+/// `stagger` 控制是否启用「多账号风控间隔」：
+/// - 定时自动签到传 `true`（同一 IP 瞬时连发多账号请求容易被风控，需要打散）；
+/// - 页面手动「全部签到」传 `false`（用户主动点、期望尽快出结果，不故意等待）。
+pub(crate) async fn checkin_all_inner(
+    app: &AppHandle,
+    stagger: bool,
+) -> Result<Vec<Account>, String> {
     let dir = data_dir(app);
     let mut accounts = accounts::load_accounts(&dir);
     if accounts.is_empty() {
@@ -506,8 +514,9 @@ pub(crate) async fn checkin_all_inner(app: &AppHandle) -> Result<Vec<Account>, S
     }
     let settings = accounts::load_settings(&dir);
     for i in 0..accounts.len() {
-        // 风控预防：从第二个账号起随机歇几秒再签，避免同一 IP 瞬时连发多账号请求
-        if i > 0 {
+        // 风控预防：从第二个账号起随机歇几秒再签，避免同一 IP 瞬时连发多账号请求。
+        // 仅自动签到启用（手动「全部签到」跳过，避免用户等待）。
+        if stagger && i > 0 {
             if let Some(secs) = stagger_seconds(settings.stagger_checkin, settings.stagger_max_seconds)
             {
                 tokio::time::sleep(std::time::Duration::from_secs(secs as u64)).await;
