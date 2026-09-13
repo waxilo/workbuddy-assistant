@@ -12,8 +12,9 @@
 //!    换账号会丢上下文，必须粘住。新会话（粘滞过期或首次）才重新选。
 //! 2. **选账号**：谁的「还有余量的资源包」最早过期就用谁——把快过期的积分先消耗掉；
 //!    查不到过期时间的账号排最后，剩余积分为 0 的账号直接跳过（除非全员为 0）。
-//! 3. **限流无感切换**：免费模型触发限流（429）时，把该账号打入 10 分钟冷却、解绑
-//!    会话粘滞，换下一个账号重发同一请求（上限 2 次切换）；冷却中的账号路由优先跳过。
+//! 3. **限流无感切换**：免费模型（按请求体 `model` 前缀识别，目前仅 Hy3）触发限流（429）
+//!    时，把该账号打入 10 分钟冷却、解绑会话粘滞，换下一个账号重发同一请求（上限 2 次
+//!    切换）；冷却中的账号路由优先跳过。付费模型的 429 原样透传。
 //! 4. **续签兜底**：选中的账号若凭证临近过期（<48h）会先自动续签。
 //! 5. **转发**：路径与查询串原样保留，替换 `Authorization` 为选中账号的 token，
 //!    去掉逐跳头（Host / Content-Length 等）后透传其余请求头。
@@ -370,11 +371,13 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
     let bare = normalize_target(&req.target);
     let path = upstream_path(bare).to_string();
     let is_chat = bare == "/chat/completions";
+    let model = if is_chat { body_model(body) } else { None };
     let url = upstream_url(&host, &path);
 
-    // 3. 选账号并透传；免费模型限流（429）发生在流式输出开始前，响应头还没写给下游，
-    //    正好有重试窗口：把限流账号打入冷却、解绑会话粘滞，换下一个账号重发同一请求，
-    //    对 CLI 完全无感。重试次数有上限，用尽后 429 原样透传。
+    // 3. 选账号并透传；免费模型（Hy3）限流（429）发生在流式输出开始前，响应头还没写给
+    //    下游，正好有重试窗口：把限流账号打入冷却、解绑会话粘滞，换下一个账号重发同一
+    //    请求，对 CLI 完全无感。付费模型的 429 与积分余额相关，原样透传不重试。
+    //    重试次数有上限，用尽后 429 原样透传。
     let mut ban: Vec<String> = Vec::new();
     loop {
         let Some(account) =
@@ -388,7 +391,11 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
             stealth::journal_append(
                 &dir,
                 "proxy_request",
-                &format!("长驻 CLI host 已使用接管端点（扣费账号：{}）", account.name),
+                &format!(
+                    "长驻 CLI host 已使用接管端点（扣费账号：{}，模型：{}）",
+                    account.name,
+                    model.as_deref().unwrap_or("未知")
+                ),
             );
         }
 
@@ -413,7 +420,7 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
         });
 
         match upstream {
-            Ok(resp) if is_chat && resp.status() == 429 => {
+            Ok(resp) if is_chat && is_free_model(model.as_deref()) && resp.status() == 429 => {
                 // 限流账号冷却 + 会话解绑：同一会话的下一次请求也会自动绕开它
                 if let Ok(mut m) = cooldown().lock() {
                     m.insert(account.id.clone(), Instant::now());
@@ -423,13 +430,14 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
                         s.remove(c);
                     }
                 }
+                let m = model.as_deref().unwrap_or("未知");
                 if ban.len() + 1 < FAILOVER_MAX_TRIES {
                     ban.push(account.id.clone());
                     stealth::journal_append(
                         &dir,
                         "failover",
                         &format!(
-                            "账号「{}」触发限流（429），已无感切换备用账号继续服务",
+                            "账号「{}」的 {m} 请求触发限流（429），已无感切换备用账号继续服务",
                             account.name
                         ),
                     );
@@ -439,7 +447,7 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
                     &dir,
                     "failover",
                     &format!(
-                        "账号「{}」触发限流（429），已无更多备用账号，限流响应原样透传",
+                        "账号「{}」的 {m} 请求触发限流（429），已无更多备用账号，限流响应原样透传",
                         account.name
                     ),
                 );
@@ -497,6 +505,21 @@ fn upstream_path(path: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     path.into()
+}
+
+/// 从对话请求体里取 `model` 字段（解析失败返回 None，不阻断转发）。
+fn body_model(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("model").and_then(|m| m.as_str().map(str::to_string)))
+}
+
+/// 免费模型判定：目前已知 Hy3（前缀匹配、忽略大小写，覆盖 Hy3-xxx 之类变体）。
+/// 免费模型不扣积分但有隐藏限流，429 值得换号重试；付费模型的 429 与积分相关，透传。
+fn is_free_model(model: Option<&str>) -> bool {
+    model
+        .map(|m| m.to_ascii_lowercase().starts_with("hy3"))
+        .unwrap_or(false)
 }
 
 /// 不该回给客户端的响应头（逐跳的，或 reqwest 已代劳解压后失效的）
@@ -938,6 +961,22 @@ mod tests {
         assert_eq!(got, vec!["a".to_string(), "c".to_string()]);
         // 全员冷却 → 软过滤退回全部：让上游裁决也比代理直接 503 有信息量
         assert_eq!(ids(&available_candidates(&all, |_| true)).len(), 3);
+    }
+
+    #[test]
+    fn failover_only_for_free_models() {
+        // 请求体缺 model / 非法 JSON → 视为未知，不触发切换
+        assert_eq!(body_model(b"{}"), None);
+        assert_eq!(body_model(b"not json"), None);
+        assert_eq!(body_model(br#"{"model":"Hy3"}"#).as_deref(), Some("Hy3"));
+        // Hy3 及其变体（忽略大小写）算免费模型
+        assert!(is_free_model(Some("Hy3")));
+        assert!(is_free_model(Some("hy3-20260101")));
+        assert!(is_free_model(Some("HY3Pro")));
+        // 未知 / 其它模型不算
+        assert!(!is_free_model(None));
+        assert!(!is_free_model(Some("claude-sonnet-4")));
+        assert!(!is_free_model(Some("gpt-5")));
     }
 
     #[test]
