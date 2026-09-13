@@ -98,14 +98,25 @@ jobs:
 
           tag, repo = os.environ["TAG"], os.environ["REPO"]
 
-          # 递归收集所有 bundle 文件（artifact 合并后目录层级较深），
-          # 改名加平台前缀后统一拍平到 assets/ 根目录；冲突时追加序号，避免静默丢文件。
+          # 只收集真实安装包（白名单扩展名），绝不把 .app 内部的二进制 / Info.plist /
+          # icon.icns、dmg 资源 bundle_dmg.sh 等垃圾搬进 Release。
+          WHITELIST = (".dmg", ".msi", ".app.tar.gz", ".sig")
+          def is_installer(name):
+              if name.endswith(WHITELIST):
+                  return True
+              if name.endswith("-setup.exe"):   # NSIS 安装包
+                  return True
+              return False
+
           collected = []
           for root, _, fs in os.walk("."):
               if root == ".":
                   continue
               for name in fs:
-                  collected.append(os.path.join(root, name))
+                  if name == "latest.json":
+                      continue
+                  if is_installer(name):
+                      collected.append(os.path.join(root, name))
           collected.sort()
 
           def target_name(f):
@@ -120,12 +131,9 @@ jobs:
 
           mapping = {}
           for f in collected:
-              if os.path.basename(f) == "latest.json":
-                  continue
               new = target_name(f)
               dest = new
-              # 冲突保护
-              if os.path.exists(dest):
+              if os.path.exists(dest):      # 冲突保护，避免静默丢文件
                   i = 1
                   stem, ext = os.path.splitext(new)
                   while os.path.exists(dest):
@@ -133,9 +141,8 @@ jobs:
                       i += 1
               shutil.move(f, dest)
               mapping[os.path.basename(f)] = dest
-          print("renamed:", json.dumps(mapping, indent=2))
+          print("moved:", json.dumps(mapping, indent=2))
 
-          # 清理已拍平的空目录
           for root, dirs, _ in os.walk(".", topdown=False):
               for d in dirs:
                   try:
@@ -157,9 +164,9 @@ jobs:
 
           for f in sorted(files):
               if f.endswith(".app.tar.gz"):
-                  arch = "aarch64" if "_aarch64" in f else ("x86_64" if "_x86_64" in f else None)
-                  if arch:
-                      add(f"darwin-{arch}", f)
+                  # macos-latest runner 为 Apple Silicon；文件名无架构后缀时默认 aarch64
+                  arch = "x86_64" if "_x86_64" in f else "aarch64"
+                  add(f"darwin-{arch}", f)
           msi = next((f for f in sorted(files) if f.endswith(".msi")), None)
           nsis = next((f for f in sorted(files) if f.endswith("-setup.exe")), None)
           if msi:
@@ -171,15 +178,9 @@ jobs:
           if not platforms:
               raise SystemExit("没有任何可用的更新产物，拒绝发布")
 
-          old = {}
-          if os.path.exists("latest.json"):
-              try:
-                  old = json.load(open("latest.json"))
-              except Exception:
-                  pass
           manifest = {
               "version": tag.lstrip("v"),
-              "notes": old.get("notes", "自动构建的桌面安装包（macOS / Windows）。"),
+              "notes": "自动构建的桌面安装包（macOS / Windows）。",
               "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "platforms": platforms,
           }
