@@ -35,49 +35,67 @@ export function AccountsPage({
     );
 
   return (
-    <ul className="account-list">
-      {accounts.map((a) => (
-        <li key={a.id} className="account-card">
-          <div className="ac-main">
-            <div className="ac-title">
-              <span className="ac-name">{maskPhone(a.name)}</span>
-              {a.phone && <span className="ac-phone">{maskPhone(a.phone)}</span>}
+    <table className="account-table">
+      <thead>
+        <tr>
+          <th>账号</th>
+          <th>剩余积分</th>
+          <th>最近签到</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {accounts.map((a) => (
+          <tr key={a.id} className="account-row">
+            <td className="ac-cell-name">
+              <div className="ac-title">
+                <span className="ac-name">{maskPhone(a.name)}</span>
+                {a.phone && <span className="ac-phone">{maskPhone(a.phone)}</span>}
+              </div>
               <ResultBadge last={a.last} />
-            </div>
-            <div className="ac-result">
-              <span className="ac-balance">
-                剩余积分：{formatCredits(a.last?.balance)}
-              </span>
+            </td>
+            <td className="ac-cell-balance">
+              {a.last?.balance != null ? (
+                <span className="ac-balance">{formatCredits(a.last.balance)}</span>
+              ) : (
+                <span className="muted">—</span>
+              )}
+            </td>
+            <td className="ac-cell-last">
               {a.last?.at && <span>{a.last.at}</span>}
-              {a.last?.streak != null && <span>连续 {a.last.streak} 天</span>}
-              {a.last?.credit != null && <span>本次 +{a.last.credit}</span>}
+              {a.last?.streak != null && (
+                <span className="muted">连续 {a.last.streak} 天</span>
+              )}
+              {a.last?.credit != null && (
+                <span className="ac-credit">+{a.last.credit}</span>
+              )}
               {/* 「今日已签」的文案与徽标重复，不再展示；失败原因仍要显示 */}
               {a.last?.message && !a.last.already && (
                 <span className="msg">{a.last.message}</span>
               )}
-            </div>
-          </div>
-          <div className="ac-actions">
-            <button
-              className="btn small"
-              disabled={busyIds.has(a.id)}
-              onClick={() => onCheckinOne(a.id)}
-            >
-              {busyIds.has(a.id) ? "…" : "签到"}
-            </button>
-            <button
-              className="btn small ghost"
-              onClick={() => onOpenLogs(a.id)}
-            >
-              日志
-            </button>
-            {/* 续签不提供手动按钮：签到前与后台扫描会自动完成（剩余有效期不足 48h） */}
-            <button className="btn small danger" onClick={() => onRemove(a)}>
-              删除
-            </button>
-          </div>
-        </li>
-      ))}
-    </ul>
+            </td>
+            <td className="ac-cell-actions">
+              <button
+                className="btn small"
+                disabled={busyIds.has(a.id)}
+                onClick={() => onCheckinOne(a.id)}
+              >
+                {busyIds.has(a.id) ? "…" : "签到"}
+              </button>
+              <button
+                className="btn small ghost"
+                onClick={() => onOpenLogs(a.id)}
+              >
+                日志
+              </button>
+              {/* 续签不提供手动按钮：签到前与后台扫描会自动完成（剩余有效期不足 48h） */}
+              <button className="btn small danger" onClick={() => onRemove(a)}>
+                删除
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

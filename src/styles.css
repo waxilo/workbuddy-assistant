@@ -235,35 +235,55 @@ body {
   margin-top: 60px;
 }
 
-.account-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 12px;
-}
-.account-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+/* 账号列表：表格样式 */
+.account-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-spacing: 0;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 14px 16px;
-  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  overflow: hidden;
+  font-size: 13px;
 }
-.account-card:hover {
-  border-color: #c9d2e3;
-  box-shadow: 0 2px 10px rgba(31, 37, 51, 0.05);
+.account-table thead {
+  background: var(--panel-2);
 }
-.ac-main {
+.account-table th {
+  padding: 11px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.account-table th:last-child,
+.account-table td:last-child {
+  text-align: right;
+}
+.account-row {
+  transition: background 0.1s ease;
+}
+.account-row:hover {
+  background: #f8fafd;
+}
+.account-row td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.account-row:last-child td {
+  border-bottom: none;
+}
+.ac-cell-name {
   min-width: 0;
 }
-.ac-title {
+.ac-cell-name .ac-title {
   display: flex;
   align-items: center;
   gap: 10px;
+  margin-bottom: 6px;
 }
 .ac-name {
   font-weight: 600;
@@ -286,27 +306,36 @@ body {
   background: #eaefff;
   padding: 2px 8px;
   border-radius: 999px;
+  white-space: nowrap;
 }
-.ac-result {
-  margin-top: 8px;
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--muted);
-}
-.ac-result .msg {
-  color: var(--text);
+.ac-cell-balance {
+  white-space: nowrap;
 }
 /* 积分余额：需要在条目上突出显示 */
-.ac-result .ac-balance {
+.ac-balance {
   color: #b45309;
   font-weight: 600;
 }
-.ac-actions {
+.ac-cell-last {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ac-cell-last .msg {
+  color: var(--text);
+}
+.ac-cell-last .ac-credit {
+  color: var(--ok);
+  font-weight: 600;
+}
+.ac-cell-actions {
+  white-space: nowrap;
   display: flex;
   gap: 8px;
-  flex-shrink: 0;
+  justify-content: flex-end;
+  align-items: center;
 }
 
 /* 徽标 */
@@ -1250,7 +1279,7 @@ body {
   overflow-wrap: anywhere;
   color: var(--text);
 }
-/* 分类配色：绿=开启，灰蓝=关闭，蓝=账号启用，红=错误 */
+/* 分类配色：绿=开启，灰=关闭，蓝=账号启用，橙=限流切换，红=错误 */
 .evt .tag-on {
   color: var(--ok);
   background: #e3f6ea;
@@ -1262,6 +1291,10 @@ body {
 .evt .tag-route {
   color: var(--primary-d);
   background: #eaefff;
+}
+.evt .tag-failover {
+  color: #c9821a;
+  background: #fdf3e2;
 }
 .evt .tag-restart {
   color: var(--warn);
@@ -1275,7 +1308,7 @@ body {
   color: var(--err);
 }
 
-/* ── 设置页：卡片式分组布局 ── */
+/* ── 设置页：左右两栏卡片布局 ── */
 .set-page {
   display: flex;
   flex-direction: column;
@@ -1297,6 +1330,8 @@ body {
 }
 
 .set-card {
+  display: flex;
+  align-items: stretch;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -1304,11 +1339,12 @@ body {
   box-shadow: var(--shadow);
 }
 .set-card-head {
+  flex: 0 0 180px;
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
+  flex-direction: column;
+  justify-content: flex-start;
+  padding: 18px;
+  border-right: 1px solid var(--border);
   background: var(--panel-2);
 }
 .set-card-title {
@@ -1318,10 +1354,12 @@ body {
 .set-card-sub {
   font-size: 12px;
   color: var(--muted);
-  margin-top: 3px;
+  margin-top: 4px;
+  line-height: 1.5;
 }
 
 .set-group {
+  flex: 1;
   padding: 6px 18px;
 }
 .set-row {
@@ -1384,7 +1422,7 @@ body {
   padding: 14px 18px 4px;
   border-top: 1px dashed var(--border);
   background: var(--panel-2);
-  border-radius: 0 0 14px 14px;
+  border-radius: 0 0 14px 0;
   display: flex;
   flex-direction: column;
   gap: 12px;

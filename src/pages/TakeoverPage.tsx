@@ -14,7 +14,7 @@ import type { ConfirmReq, Toast } from "../common";
 /** 事件类型 → 界面标签与配色 */
 function eventKind(e: JournalEvent): {
   label: string;
-  cls: "on" | "off" | "route" | "restart" | "err";
+  cls: "on" | "off" | "route" | "failover" | "restart" | "err";
 } {
   switch (e.event) {
     case "install":
@@ -24,7 +24,7 @@ function eventKind(e: JournalEvent): {
     case "route_start":
       return { label: "开始使用账号", cls: "route" };
     case "failover":
-      return { label: "限流切换", cls: "route" };
+      return { label: "限流切换", cls: "failover" };
     case "restart_workbuddy":
       return { label: "重启 WorkBuddy", cls: "restart" };
     case "proxy_upstream_error":

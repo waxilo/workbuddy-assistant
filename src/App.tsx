@@ -436,9 +436,7 @@ export default function App() {
             </>
           )}
           {page === "logs" && (
-            <button className="btn ghost" onClick={() => setModal({ type: "oauth" })}>
-              登录新账号
-            </button>
+            <span className="tag">按账号筛选查看签到记录</span>
           )}
         </header>
 
