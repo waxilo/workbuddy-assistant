@@ -186,18 +186,6 @@ export interface StealthStatus {
   note: string;
 }
 
-/** 反代的一次路由记录 */
-export interface RouteLog {
-  at: string;
-  account: string;
-  path: string;
-  /** 会话 id 前 8 位；无则空串 */
-  conv: string;
-  status: number;
-  /** 是否为 SSE 流式响应 */
-  stream: boolean;
-}
-
 /** 接管事件流的一条记录（takeover-journal.jsonl） */
 export interface JournalEvent {
   at_ms: number;

@@ -11,7 +11,6 @@ import type {
   NetReport,
   NetRestoreReport,
   StealthStatus,
-  RouteLog,
   JournalEvent,
 } from "./types";
 
@@ -71,9 +70,6 @@ export const saveSettings = (settings: Settings) =>
 export const applySettings = (settings: Settings) =>
   invoke<Settings>("apply_settings", { settings });
 
-/** 温和退出并重新拉起 WorkBuddy 桌面端及其长驻 CLI host */
-export const restartWorkbuddy = () => invoke<void>("restart_workbuddy");
-
 /** 发一条测试通知，返回推送服务的原始响应 */
 export const testNotify = (webhook: string) =>
   invoke<string>("test_notify", { webhook });
@@ -115,12 +111,6 @@ export const revealPath = (path: string) => invoke<void>("reveal_path", { path }
 
 /** 查询无感接管状态（只读） */
 export const stealthStatus = () => invoke<StealthStatus>("stealth_status");
-
-/** 安全停止接管并重启 WorkBuddy/长驻 CLI host，清除缓存端点 */
-export const stealthStop = () => invoke<StealthStatus>("stealth_stop");
-
-/** 反代最近若干次路由（新的在前），用来看「现在实际在用哪个账号」 */
-export const proxyRoutes = () => invoke<RouteLog[]>("proxy_routes");
 
 /** 接管事件流（新的在前）：开启 / 关闭 / 开始使用账号 / 重启 / 错误 */
 export const takeoverEvents = () => invoke<JournalEvent[]>("takeover_events");

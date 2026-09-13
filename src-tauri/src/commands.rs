@@ -673,11 +673,6 @@ pub(crate) fn restart_workbuddy_process(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn restart_workbuddy(app: AppHandle) -> Result<(), String> {
-    restart_workbuddy_process(&app)
-}
-
 fn normalize_settings(mut settings: Settings) -> Result<Settings, String> {
     settings.schedule_time = accounts::normalize_time(&settings.schedule_time)
         .ok_or_else(|| "定时签到时刻格式应为 HH:MM（例如 09:07）".to_string())?;

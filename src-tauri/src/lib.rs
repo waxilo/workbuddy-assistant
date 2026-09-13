@@ -60,7 +60,6 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::apply_settings,
-            commands::restart_workbuddy,
             commands::test_notify,
             commands::get_autostart,
             commands::set_autostart,
@@ -71,12 +70,10 @@ pub fn run() {
             netfix::net_diagnose,
             netfix::net_restore,
             netfix::reveal_path,
-            // 无感接管：状态查询 / 立即停止 / 最近路由
+            // 无感接管：状态查询 / 事件流
             stealth::stealth_status,
-            stealth::stealth_stop,
             stealth::takeover_events_clear,
             stealth::takeover_events,
-            proxy::proxy_routes,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -27,11 +27,10 @@ use crate::accounts;
 use crate::checkin::fetch_credit_snapshot;
 use crate::commands;
 use crate::stealth;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -52,8 +51,6 @@ const UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// 请求头 / 请求体上限
 const MAX_HEAD: usize = 64 * 1024;
 const MAX_BODY: usize = 16 * 1024 * 1024;
-/// 保留给界面展示的最近路由条数
-const ROUTE_LOG_MAX: usize = 50;
 
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -68,8 +65,6 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .build()
         .expect("构建 HTTP 客户端失败")
 });
-
-static PROXY_REQUEST_RECORDED: AtomicBool = AtomicBool::new(false);
 
 /// 一个账号的积分画像（缓存值）
 #[derive(Clone, Copy, Default, Debug)]
@@ -96,41 +91,6 @@ fn last_snapshot() -> &'static Mutex<Option<Instant>> {
 fn sticky() -> &'static Mutex<HashMap<String, (Instant, String)>> {
     static STICKY: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
     STICKY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// 最近若干次路由，给界面看「现在到底在用哪个账号」
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct RouteLog {
-    pub at: String,
-    pub account: String,
-    pub path: String,
-    /// 会话 id 前 8 位；无则为空串
-    pub conv: String,
-    pub status: u16,
-    /// 是否为 SSE 流式响应
-    pub stream: bool,
-}
-
-fn route_log() -> &'static Mutex<VecDeque<RouteLog>> {
-    static LOG: OnceLock<Mutex<VecDeque<RouteLog>>> = OnceLock::new();
-    LOG.get_or_init(|| Mutex::new(VecDeque::new()))
-}
-
-/// 取最近路由（新在前）。供 Tauri 命令读取。
-pub fn recent_routes() -> Vec<RouteLog> {
-    route_log()
-        .lock()
-        .map(|l| l.iter().cloned().collect::<Vec<_>>())
-        .unwrap_or_default()
-}
-
-fn push_route(log: RouteLog) {
-    if let Ok(mut l) = route_log().lock() {
-        l.push_front(log);
-        while l.len() > ROUTE_LOG_MAX {
-            l.pop_back();
-        }
-    }
 }
 
 /// 路由排序键：最早过期者优先 → 查不到过期时间的靠后 → 剩余积分多者略优先。
@@ -412,7 +372,7 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
     });
 
     match upstream {
-        Ok(resp) => stream_response(&mut stream, resp, &dir, &account, &host, &path, conv.as_deref()),
+        Ok(resp) => stream_response(&mut stream, resp, &dir, &account, &host, &path),
         Err(e) => {
             let msg = format!("upstream error: {e}");
             stealth::journal_append(&dir, "proxy_upstream_error", &msg);
@@ -535,7 +495,6 @@ fn stream_response(
     account: &accounts::Account,
     host: &str,
     path: &str,
-    conv: Option<&str>,
 ) {
     let status = resp.status().as_u16();
     let ctype = resp
@@ -544,7 +503,6 @@ fn stream_response(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
-    let is_stream = ctype.contains("event-stream");
 
     let mut headers: Vec<(String, String)> = resp
         .headers()
@@ -585,30 +543,6 @@ fn stream_response(
         stealth::journal_append(dir, "proxy_stream_error", &format!("[{path}] {msg}"));
     }
     let _ = write_chunk_end(stream);
-
-    push_route(RouteLog {
-        at: chrono::Local::now().format("%H:%M:%S").to_string(),
-        account: account.name.clone(),
-        path: truncate_path(path),
-        conv: conv.map(|c| c.chars().take(8).collect()).unwrap_or_default(),
-        status,
-        stream: is_stream,
-    });
-}
-
-/// 取最近路由记录（新的在前）
-#[tauri::command]
-pub fn proxy_routes() -> Vec<RouteLog> {
-    recent_routes()
-}
-
-/// 路径可能很长（带查询串），展示时截断
-fn truncate_path(p: &str) -> String {
-    const MAX: usize = 48;
-    if p.chars().count() <= MAX {
-        return p.to_string();
-    }
-    format!("{}…", p.chars().take(MAX).collect::<String>())
 }
 
 impl Request {
@@ -1034,7 +968,6 @@ mod tests {
             &acct,
             "mock.host",
             "/chat/completions",
-            Some("conv-e2e"),
         );
         drop(server); // 关写端，让客户端读到 EOF
 
@@ -1053,24 +986,6 @@ mod tests {
         assert!(out.contains("data: {\"a\":1}"), "SSE 帧要透传：{out:?}");
         assert!(out.contains("data: [DONE]"));
         assert!(out.ends_with("0\r\n\r\n"), "必须以终止帧收尾：{out:?}");
-    }
-
-    #[test]
-    fn route_log_keeps_only_the_recent_window() {
-        for i in 0..(ROUTE_LOG_MAX + 12) {
-            push_route(RouteLog {
-                at: "00:00:00".into(),
-                account: format!("acct-{i}"),
-                path: "/chat/completions".into(),
-                conv: "abcdefgh".into(),
-                status: 200,
-                stream: true,
-            });
-        }
-        let log = recent_routes();
-        assert_eq!(log.len(), ROUTE_LOG_MAX, "超出上限的旧记录要丢弃");
-        // 新的在前
-        assert_eq!(log[0].account, format!("acct-{}", ROUTE_LOG_MAX + 11));
     }
 
     #[test]

@@ -412,17 +412,6 @@ pub fn takeover_events_clear(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 安全停止接管：摘掉端点后重启 WorkBuddy，清除长驻 CLI host 缓存，再停止监听。
-#[tauri::command]
-pub fn stealth_stop(app: tauri::AppHandle) -> Result<StealthStatus, String> {
-    let dir = crate::commands::try_data_dir(&app)?;
-    let home = home_dir()?;
-    let mut settings = crate::accounts::load_settings(&dir);
-    settings.proxy_enabled = false;
-    crate::commands::apply_settings_inner(&app, settings)?;
-    Ok(status(&home, &dir))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
