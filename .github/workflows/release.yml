@@ -186,15 +186,29 @@ jobs:
           }
           json.dump(manifest, open("latest.json", "w"), ensure_ascii=False, indent=2)
           print("platforms:", list(platforms.keys()))
+
+          # 记录最终要上传的产物（改名后的安装包 + .sig + latest.json），供下方 gh 显式上传，
+          # 避免用 ./* 通配到 bundle/ 残留目录（如 dmg/、WorkBuddyAssistant.app/）导致上传失败。
+          with open("publish_list.txt", "w") as pl:
+              for dest in mapping.values():
+                  pl.write(dest + "\n")
+              pl.write("latest.json\n")
+          print("publish_list:", sorted(mapping.values()) + ["latest.json"])
           PY
 
-          # 创建 draft Release 并上传全部产物（含改名后的安装包、.sig、latest.json）
+          # 先创建空的 draft Release（不挂任何产物，避免 ./* 把 bundle 残留目录当文件上传）
           gh release create "$TAG" \
             --repo "$REPO" \
             --draft \
             --title "WorkBuddy 签到助手 $TAG" \
-            --notes "自动构建的桌面安装包（macOS / Windows）。" \
-            ./*
+            --notes "自动构建的桌面安装包（macOS / Windows）。"
+
+          # 仅上传 publish_list.txt 中列出的真实产物（安装包 + .sig + latest.json）
+          mapfile -t ASSETS < publish_list.txt
+          gh release upload "$TAG" \
+            --repo "$REPO" \
+            --clobber \
+            "${ASSETS[@]}"
 
           # draft 状态下应用内「检查更新」取不到，这里转正并设为 latest
           gh release edit "$TAG" --repo "$REPO" --draft=false --latest
