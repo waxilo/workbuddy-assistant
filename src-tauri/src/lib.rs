@@ -84,7 +84,9 @@ pub fn run() {
     app.run(|handle, event| {
         static CLEANED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         match &event {
-            // macOS：窗口全隐藏后点 Dock 图标（或 finder 重新打开）→ 唤回主窗口
+            // macOS：窗口全隐藏后点 Dock 图标（或 finder 重新打开）→ 唤回主窗口。
+            // Reopen 是 macOS 独有变体，Windows 编译时必须条件编译掉。
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => tray::show_main(handle),
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } => {
                 if CLEANED.swap(true, std::sync::atomic::Ordering::SeqCst) {
