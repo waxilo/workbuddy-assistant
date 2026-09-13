@@ -16,7 +16,7 @@ import {
   appVersion,
 } from "./api";
 import { checkAndInstall } from "./updater";
-import { tally, type ConfirmReq, type Toast } from "./common";
+import { accountLabel, tally, type ConfirmReq, type Toast } from "./common";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TakeoverPage } from "./pages/TakeoverPage";
 import { NetfixPage } from "./pages/NetfixPage";
@@ -231,7 +231,7 @@ export default function App() {
     async (a: Account) => {
       const ok = await askConfirm({
         title: "删除账号",
-        body: `确认删除「${a.name}${a.phone ? `（${a.phone}）` : ""}」？该账号的签到日志也会一并删除。`,
+        body: `确认删除「${accountLabel(a.name, a.phone)}」？该账号的签到日志也会一并删除。`,
         okText: "删除",
         danger: true,
       });
@@ -239,7 +239,7 @@ export default function App() {
       try {
         await removeAccount(a.id);
         setAccounts((l) => l.filter((x) => x.id !== a.id));
-        showToast({ kind: "ok", text: `已删除 ${a.name}` });
+        showToast({ kind: "ok", text: `已删除 ${accountLabel(a.name, a.phone)}` });
       } catch (e) {
         showToast({ kind: "err", text: "删除失败：" + String(e) });
       }

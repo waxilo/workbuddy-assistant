@@ -12,7 +12,7 @@ import {
   oauthStart,
   openExternal,
 } from "../api";
-import { baseName, maskToken } from "../common";
+import { baseName, maskPhone, maskToken } from "../common";
 import type { Toast } from "../common";
 
 /**
@@ -127,7 +127,7 @@ export function LocalAccountsModal({
                       <span className="local-name">
                         {d.nickname || d.uid?.slice(0, 8) || "未命名账号"}
                       </span>
-                      {d.phone && <span className="ac-phone">{d.phone}</span>}
+                      {d.phone && <span className="ac-phone">{maskPhone(d.phone)}</span>}
                       {d.is_current && (
                         <span className="badge badge-ok">当前登录</span>
                       )}
@@ -402,7 +402,7 @@ function OAuthPanel({
             <span className="local-name">
               {result.nickname || result.uid?.slice(0, 8) || "新账号"}
             </span>
-            {result.phone && <span className="ac-phone">{result.phone}</span>}
+            {result.phone && <span className="ac-phone">{maskPhone(result.phone)}</span>}
             <span className="badge badge-ok">授权成功</span>
           </div>
           <div className="ac-meta">

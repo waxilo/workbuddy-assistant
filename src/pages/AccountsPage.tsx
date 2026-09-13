@@ -1,5 +1,5 @@
 import type { Account } from "../types";
-import { ResultBadge, formatCredits, maskToken } from "../common";
+import { ResultBadge, formatCredits, maskPhone, maskToken } from "../common";
 
 /**
  * 首页：账号列表 + 签到操作。
@@ -44,8 +44,8 @@ export function AccountsPage({
         <li key={a.id} className="account-card">
           <div className="ac-main">
             <div className="ac-title">
-              <span className="ac-name">{a.name}</span>
-              {a.phone && <span className="ac-phone">{a.phone}</span>}
+              <span className="ac-name">{maskPhone(a.name)}</span>
+              {a.phone && <span className="ac-phone">{maskPhone(a.phone)}</span>}
               <ResultBadge last={a.last} />
             </div>
             <div className="ac-meta">

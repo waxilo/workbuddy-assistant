@@ -7,6 +7,7 @@ import {
   saveSettings,
   stealthStatus,
 } from "../api";
+import { maskPhone } from "../common";
 import type { ConfirmReq, Toast } from "../common";
 
 /** 事件类型 → 界面标签与配色 */
@@ -374,8 +375,8 @@ export function TakeoverPage({
                       onChange={() => toggleDraft(a.id)}
                       onClick={(e) => e.stopPropagation()}
                     />
-                    <span className="am-name">{a.name}</span>
-                    {a.phone && <span className="am-phone">{a.phone}</span>}
+                    <span className="am-name">{maskPhone(a.name)}</span>
+                    {a.phone && <span className="am-phone">{maskPhone(a.phone)}</span>}
                     <span className="am-state">
                       {draftEffective.includes(a.id) ? "可扣费" : "已排除"}
                     </span>

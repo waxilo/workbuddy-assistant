@@ -32,9 +32,15 @@ export function formatCredits(v?: number | null): string {
   return String(Math.round(v * 100) / 100);
 }
 
-/// 账号在日志/筛选中的展示名：名称 + 手机号（手机号缺失时省略）
+/** 手机号脱敏（纯展示）：11 位纯数字按 138****1234 处理，其它字符串原样返回 */
+export function maskPhone(s: string): string {
+  return /^\d{11}$/.test(s) ? s.slice(0, 3) + "****" + s.slice(7) : s;
+}
+
+/// 账号在日志/筛选中的展示名：名称 + 手机号（手机号缺失时省略）。
+/// 名称本身是手机号时同样脱敏；过滤/匹配请直接用原始字段，不要经过这里。
 export function accountLabel(name: string, phone?: string | null): string {
-  return phone ? `${name}（${phone}）` : name;
+  return phone ? `${maskPhone(name)}（${maskPhone(phone)}）` : maskPhone(name);
 }
 
 /** 一批签到结果的互斥计数（成功 / 已签 / 失败），避免「已签」被重复算成「成功」 */
