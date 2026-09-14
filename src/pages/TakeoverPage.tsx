@@ -72,6 +72,8 @@ export function TakeoverPage({
   const [events, setEvents] = useState<JournalEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // 接管动态手动刷新：独立于 15s 自动轮询，点按即重拉状态与事件流
+  const [feedBusy, setFeedBusy] = useState(false);
   // 限流切换说明弹窗：展示支持无感切换的免费模型，支持手动刷新
   const [fmOpen, setFmOpen] = useState(false);
   const [fm, setFm] = useState<FreeModelsReport | null>(null);
@@ -98,6 +100,16 @@ export function TakeoverPage({
     return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** 手动刷新接管动态（重拉状态与事件流） */
+  const doRefreshFeed = useCallback(async () => {
+    setFeedBusy(true);
+    try {
+      await refreshStealth();
+    } finally {
+      setFeedBusy(false);
+    }
+  }, [refreshStealth]);
 
   /** 清空接管动态（不可恢复），清完刷新本地列表 */
   const doClearEvents = async () => {
@@ -320,6 +332,14 @@ export function TakeoverPage({
           <h3>接管动态</h3>
           <span className="tk-sec-meta">开启 / 关闭 / 每个会话开始用哪个账号 / 异常</span>
           <span className="spacer" />
+          <button
+            className="btn small ghost"
+            disabled={feedBusy}
+            title="重新拉取接管状态与动态"
+            onClick={() => void doRefreshFeed()}
+          >
+            {feedBusy ? "刷新中…" : "刷新"}
+          </button>
           <button
             className="btn small ghost"
             title="查看哪些模型支持限流无感切换（可刷新拉取最新）"

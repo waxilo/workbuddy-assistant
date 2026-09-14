@@ -95,30 +95,40 @@ export function LogsPage({
           <span className="empty-sub">完成签到后，记录会按时间倒序显示在这里</span>
         </div>
       ) : (
-        <ul className="log-list page-list">
-          {logs.map((l) => (
-            <li key={l.id} className="log-item">
-              <div className="log-main">
-                <div className="log-head">
-                  <LogBadge log={l} />
-                  <span className="log-name">
+        <div className="log-table-wrap">
+          <table className="log-table">
+            <thead>
+              <tr>
+                <th>账号</th>
+                <th>状态</th>
+                <th>时间</th>
+                <th className="num">本次积分</th>
+                <th className="num">剩余余额</th>
+                <th>消息</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logs.map((l) => (
+                <tr key={l.id}>
+                  <td className="log-cell-name">
                     {accountLabel(l.account_name, l.account_phone)}
-                  </span>
-                </div>
-                {l.message && <div className="log-msg">{l.message}</div>}
-              </div>
-              <div className="log-right">
-                <span className="log-time">{l.at}</span>
-                {l.credit != null && (
-                  <span className="log-credit">+{formatCredits(l.credit)}</span>
-                )}
-                {l.balance != null && (
-                  <span className="log-balance">余 {formatCredits(l.balance)}</span>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
+                  </td>
+                  <td>
+                    <LogBadge log={l} />
+                  </td>
+                  <td className="log-cell-time">{l.at}</td>
+                  <td className="num log-credit">
+                    {l.credit != null ? "+" + formatCredits(l.credit) : "—"}
+                  </td>
+                  <td className="num log-balance">
+                    {l.balance != null ? formatCredits(l.balance) : "—"}
+                  </td>
+                  <td className="log-cell-msg">{l.message || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

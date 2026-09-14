@@ -455,21 +455,21 @@ export function SettingsPage({
       </div>
 
       {err && <p className="form-err">{err}</p>}
-      <div className="set-autosave">
-        {saving ? (
-          <>
-            <span className="spin-dot" />
-            保存中…
-          </>
-        ) : saved ? (
-          <>
-            <IconCheck size={14} />
-            修改已自动保存
-          </>
-        ) : (
-          <span className="muted">改动将自动保存</span>
-        )}
-      </div>
+      {(saving || saved) && (
+        <div className="set-autosave">
+          {saving ? (
+            <>
+              <span className="spin-dot" />
+              保存中…
+            </>
+          ) : (
+            <>
+              <IconCheck size={14} />
+              修改已自动保存
+            </>
+          )}
+        </div>
+      )}
     </section>
   );
 }
