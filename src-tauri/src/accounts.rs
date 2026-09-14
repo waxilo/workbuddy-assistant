@@ -107,6 +107,11 @@ pub struct Settings {
     /// 空 = 全部账号都可作为备选（智能轮换）。
     #[serde(default)]
     pub billing_account_ids: Vec<String>,
+    /// 限流无感切换生效的模型（多选）：这些模型触发 429 时自动换备用账号重发同一请求。
+    /// 0 积分（免费）模型恒生效、无需勾选；这里只存用户额外勾选的付费模型。
+    /// 空 = 仅 0 积分免费模型享受限流切换。
+    #[serde(default)]
+    pub rate_limit_models: Vec<String>,
     /// 多账号风控预防：批量签到时在账号之间加入随机间隔，避免同一 IP 瞬时连发多账号请求。
     #[serde(default = "default_true")]
     pub stagger_checkin: bool,
@@ -129,6 +134,7 @@ impl Default for Settings {
             proxy_enabled: false,
             proxy_port: default_proxy_port(),
             billing_account_ids: Vec::new(),
+            rate_limit_models: Vec::new(),
             stagger_checkin: true,
             stagger_max_seconds: default_stagger_max(),
         }

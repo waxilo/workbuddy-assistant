@@ -78,6 +78,8 @@ export function TakeoverPage({
   const [fmOpen, setFmOpen] = useState(false);
   const [fm, setFm] = useState<FreeModelsReport | null>(null);
   const [fmBusy, setFmBusy] = useState(false);
+  // 限流切换模型勾选：用户额外启用的付费模型（免费模型恒生效，不进这里）
+  const [rlModels, setRlModels] = useState<string[]>(settings.rate_limit_models);
 
   const allIds = useMemo(() => accounts.map((a) => a.id), [accounts]);
   /** 实际生效的勾选集：未指定时视为全选 */
@@ -98,6 +100,12 @@ export function TakeoverPage({
     void refreshStealth();
     const t = window.setInterval(() => void refreshStealth(), 15000);
     return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 接管页打开即拉取模型列表（供「限流切换模型」勾选区使用） */
+  useEffect(() => {
+    void loadFreeModels(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -143,6 +151,21 @@ export function TakeoverPage({
     },
     [onToast]
   );
+
+  /** 勾选 / 取消某个付费模型的限流切换；免费模型恒生效不可改。即拨即存。 */
+  const toggleModel = async (id: string) => {
+    const next = rlModels.includes(id)
+      ? rlModels.filter((x) => x !== id)
+      : [...rlModels, id];
+    setRlModels(next);
+    try {
+      const saved = await saveSettings(snapshot({ rate_limit_models: next }));
+      onSettings(saved);
+    } catch (e) {
+      setRlModels(rlModels); // 回滚
+      onToast({ kind: "err", text: "保存限流模型失败：" + String(e) });
+    }
+  };
 
   /** 组装一份以当前界面状态为准的设置 */
   const snapshot = (over?: Partial<Settings>): Settings => ({    ...settings,
@@ -326,6 +349,65 @@ export function TakeoverPage({
 
       {err && <p className="form-err">{err}</p>}
 
+      {/* ── 限流切换模型：勾选哪些模型享受 429 无感换号；免费模型锁定 ── */}
+      <div className="tk-section tk-models">
+        <div className="tk-sec-head">
+          <h3>限流切换模型</h3>
+          <span className="tk-sec-meta">
+            选中模型触发 429 时自动换备用账号重发；0 积分模型默认生效不可取消
+          </span>
+          <span className="spacer" />
+          <button
+            className="btn small ghost"
+            disabled={fmBusy}
+            title="重新从网关拉取模型列表"
+            onClick={() => void loadFreeModels(true)}
+          >
+            {fmBusy ? "刷新中…" : "刷新"}
+          </button>
+        </div>
+        {fm == null ? (
+          <p className="hint">加载中…（从网关拉取模型列表）</p>
+        ) : fm.models.length === 0 ? (
+          <p className="hint">暂未发现模型。</p>
+        ) : (
+          <ul className="rl-list">
+            {fm.models.map((m) => {
+              const checked = m.free || rlModels.includes(m.id);
+              return (
+                <li
+                  key={m.id}
+                  className={m.free ? "rl-item free" : "rl-item"}
+                  title={
+                    m.free
+                      ? "0 积分免费模型，恒享受限流切换，不可取消"
+                      : "勾选后该付费模型也享受 429 无感换号"
+                  }
+                  onClick={() => {
+                    if (!m.free) void toggleModel(m.id);
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={m.free}
+                    onChange={() => {
+                      if (!m.free) void toggleModel(m.id);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                  <span className="rl-name">{m.id}</span>
+                  <span className={`rl-tag ${m.free ? "free" : "paid"}`}>
+                    {m.free ? "免费" : m.multiplier || "付费"}
+                  </span>
+                  {m.free && <span className="rl-lock">默认</span>}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
       {/* ── 接管动态：铺满剩余空间，列表内部滚动（滚动条隐藏） ── */}
       <div className="tk-section tk-feed">
         <div className="tk-sec-head">
@@ -469,23 +551,11 @@ export function TakeoverPage({
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>限流切换说明</h2>
             <p className="hint">
-              免费模型（积分倍率 x0.00）触发限流（429）时，代理会把该账号冷却 10 分钟、
-              自动换备用账号重发同一请求，对话完全无感；付费模型的限流会原样透传。
-              以下列表从网关动态拉取（缓存 1 小时），腾讯增删免费模型后点「刷新」即可同步。
+              选中的模型触发限流（429）时，代理会将该账号冷却 10 分钟、自动换备用账号重发同一请求，对话完全无感；
+              换号按「积分最早过期」优先（先消耗快过期的额度）。
+              0 积分（免费）模型默认全部生效、不可取消；付费模型在上方「限流切换模型」里勾选后同样生效。
+              模型列表从网关动态拉取（缓存 1 小时），腾讯增删模型后点「刷新」即可同步。
             </p>
-            {fm == null ? (
-              <p className="hint">加载中…</p>
-            ) : fm.models.length === 0 ? (
-              <p className="hint">暂未发现免费模型。</p>
-            ) : (
-              <ul className="fm-chips">
-                {fm.models.map((m) => (
-                  <li key={m} className="fm-chip">
-                    {m}
-                  </li>
-                ))}
-              </ul>
-            )}
             {fm && (
               <p className="hint fm-source">
                 {fm.source === "fetched"

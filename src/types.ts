@@ -53,6 +53,9 @@ export interface Settings {
   proxy_port: number;
   /** 扣费备选账号 id 列表（多选）：反代只在这批账号里选号扣费；空 = 全部可用 */
   billing_account_ids: string[];
+  /** 限流无感切换生效的模型 id 列表（多选）：这些模型触发 429 时自动换备用账号重发；
+   *  0 积分免费模型恒生效无需勾选，这里只存用户额外勾选的付费模型；空 = 仅免费模型 */
+  rate_limit_models: string[];
   /** 多账号风控预防：批量签到时在账号之间加入随机间隔 */
   stagger_checkin: boolean;
   /** 随机间隔上限（秒），实际在 2..=max 之间取值 */
@@ -209,9 +212,20 @@ export interface JournalEvent {
   detail: string;
 }
 
-/** 「限流切换」支持的免费模型列表（从网关动态拉取） */
+/** 「限流切换」模型列表中的单个模型 */
+export interface ModelInfo {
+  /** 模型 id，如 hy3 / hy3-x / deepseek-v3 … */
+  id: string;
+  /** 是否 0 积分免费模型（恒生效、UI 锁定勾选不可取消） */
+  free: boolean;
+  /** 积分倍率原始串（如 "x0.00" / "x0.05"），仅展示用 */
+  multiplier: string;
+}
+
+/** 「限流切换」支持的模型列表（全模型，从网关动态拉取） */
 export interface FreeModelsReport {
-  models: string[];
+  /** 免费排前、其余按 id 排序 */
+  models: ModelInfo[];
   /** fetched = 刚从网关拉取；cache = 1 小时缓存内；fallback = 拉取失败用内置兜底 */
   source: "fetched" | "cache" | "fallback";
 }

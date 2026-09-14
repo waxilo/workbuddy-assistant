@@ -1472,6 +1472,67 @@ body {
   font-size: 12px;
   color: var(--muted);
 }
+
+/* 限流切换模型勾选列表：固定高度、内部滚动，给下方「接管动态」留空间 */
+.tk-models {
+  max-height: 240px;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+.rl-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: grid;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.rl-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+.rl-item.free {
+  background: #f3fbf6;
+  border-color: #cdeadd;
+}
+.rl-item input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+.rl-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.rl-tag {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+.rl-tag.free {
+  color: #1f9d57;
+  background: #d8f3e4;
+}
+.rl-tag.paid {
+  color: #9a6b00;
+  background: #fbeecb;
+}
+.rl-lock {
+  font-size: 11px;
+  color: var(--muted);
+}
 /* 弹框里的账号过滤输入框 */
 .acct-filter {
   margin: 0 0 10px !important;

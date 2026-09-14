@@ -426,7 +426,9 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
         };
 
         match upstream {
-            Ok(resp) if is_chat && is_free_model(model.as_deref(), &free_set) && resp.status() == 429 => {
+            Ok(resp) if is_chat
+                && is_rate_limited_model(model.as_deref(), &free_set, &settings.rate_limit_models)
+                && resp.status() == 429 => {
                 // 限流账号冷却 + 会话解绑：同一会话的下一次请求也会自动绕开它
                 if let Ok(mut m) = cooldown().lock() {
                     m.insert(account.id.clone(), Instant::now());
@@ -557,17 +559,6 @@ fn free_models_cache() -> &'static Mutex<Option<(Instant, HashSet<String>)>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
-/// 拉取免费模型集（网络）。失败返回 None，调用方用兜底。
-async fn fetch_free_models(host: &str, token: &str) -> Option<HashSet<String>> {
-    let url = format!(
-        "{}/v2/enterprises/personal/models",
-        host.trim_end_matches('/')
-    );
-    let resp = CLIENT.get(&url).bearer_auth(token).send().await.ok()?;
-    let v: serde_json::Value = resp.json().await.ok()?;
-    free_ids_from_value(&v)
-}
-
 /// 惰性获取免费模型集：缓存有效直接用；过期则用当前账号 token 拉一次；
 /// 拉取失败用内置兜底（并保留旧缓存，避免每次请求都重试打接口）。
 fn ensure_free_models(host: &str, token: &str) -> HashSet<String> {
@@ -595,22 +586,94 @@ fn is_free_model(model: Option<&str>, free: &HashSet<String>) -> bool {
     model.is_some_and(|m| free.contains(m))
 }
 
-/// 「限流切换」支持的模型（供 UI 弹窗展示与手动刷新）
+/// 限流无感切换是否对该模型生效：免费模型（动态集合）恒生效，外加用户在设置里
+/// 勾选的付费模型。`rate_limit_models` 来自 `Settings`，0 积分模型无需勾选即自动覆盖。
+fn is_rate_limited_model(
+    model: Option<&str>,
+    free: &HashSet<String>,
+    enabled: &[String],
+) -> bool {
+    is_free_model(model, free) || model.is_some_and(|m| enabled.iter().any(|e| e == m))
+}
+
+/// 单个模型的描述（供 UI 勾选限流切换范围）
+#[derive(serde::Serialize, Clone)]
+pub struct ModelInfo {
+    /// 模型 id（如 hy3 / hy3-x / deepseek-v3 …）
+    pub id: String,
+    /// 是否 0 积分免费模型（恒生效、UI 锁定勾选）
+    pub free: bool,
+    /// 积分倍率原始串（如 "x0.00" / "x0.05"），仅展示用
+    pub multiplier: String,
+}
+
+/// 「限流切换」支持的模型（供接管页勾选 + 手动刷新）
 #[derive(serde::Serialize)]
 pub struct FreeModelsReport {
-    pub models: Vec<String>,
+    /// 全模型列表（含免费与付费），免费排前、其余按 id 排序
+    pub models: Vec<ModelInfo>,
     /// "fetched" = 刚从网关拉取；"cache" = 1 小时缓存内；"fallback" = 拉取失败用内置兜底
     pub source: String,
 }
 
-fn sorted_models(set: &HashSet<String>) -> Vec<String> {
-    let mut v: Vec<String> = set.iter().cloned().collect();
-    v.sort();
-    v
+/// 拉取整份 models 接口响应（一次 HTTP，路由用的免费集合与 UI 用的全模型都从它派生）
+async fn fetch_models_value(host: &str, token: &str) -> Option<serde_json::Value> {
+    let url = format!(
+        "{}/v2/enterprises/personal/models",
+        host.trim_end_matches('/')
+    );
+    let resp = CLIENT.get(&url).bearer_auth(token).send().await.ok()?;
+    resp.json().await.ok()
 }
 
-/// 免费模型列表（限流切换的生效范围）：优先读缓存；`refresh=true` 或缓存过期时
-/// 用任一账号的 token 从网关重新拉取（倍率 x0.00 的模型）。UI 弹窗展示 + 手动刷新。
+/// 免费模型集（动态拉取、1h 缓存；拿不到用内置兜底）：供路由判定限流切换
+async fn fetch_free_models(host: &str, token: &str) -> Option<HashSet<String>> {
+    fetch_models_value(host, token).await.and_then(|v| free_ids_from_value(&v))
+}
+
+/// 全模型描述列表（免费排前、其余按 id 排序），供 UI 勾选限流切换范围
+fn model_info_from_value(v: &serde_json::Value) -> Vec<ModelInfo> {
+    let Some(arr) = v
+        .get("data")
+        .and_then(|d| d.get("models"))
+        .and_then(|m| m.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<ModelInfo> = arr
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            let multiplier = m
+                .get("credits")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let free = parse_multiplier(&multiplier).is_some_and(|x| x == 0.0);
+            Some(ModelInfo {
+                id,
+                free,
+                multiplier,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| match (a.free, b.free) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.id.cmp(&b.id),
+    });
+    out
+}
+
+/// UI 用的全模型缓存：(拉取成功时刻, 模型列表)
+fn all_models_cache() -> &'static Mutex<Option<(Instant, Vec<ModelInfo>)>> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<ModelInfo>)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// 免费模型列表（限流切换的生效范围）：优先读全模型缓存；`refresh=true` 或缓存过期时
+/// 用任一账号的 token 从网关重新拉取（倍率 x0.00 的模型恒生效，付费模型需用户勾选）。
+/// 接管页勾选 + 手动刷新。同时顺手刷新路由用的免费集合缓存。
 #[tauri::command]
 pub async fn free_models(
     app: tauri::AppHandle,
@@ -618,11 +681,11 @@ pub async fn free_models(
 ) -> Result<FreeModelsReport, String> {
     let dir = crate::commands::try_data_dir(&app)?;
     if !refresh.unwrap_or(false) {
-        if let Ok(guard) = free_models_cache().lock() {
-            if let Some((at, set)) = guard.as_ref() {
+        if let Ok(guard) = all_models_cache().lock() {
+            if let Some((at, list)) = guard.as_ref() {
                 if at.elapsed() < FREE_MODELS_TTL {
                     return Ok(FreeModelsReport {
-                        models: sorted_models(set),
+                        models: list.clone(),
                         source: "cache".into(),
                     });
                 }
@@ -636,20 +699,31 @@ pub async fn free_models(
         .ok_or_else(|| "暂无账号，无法拉取模型列表".to_string())?;
     // token 临近过期就先续签（不落盘也无妨：落盘版只在路由时做，这里仅求拉取成功）
     let _ = commands::ensure_fresh_token(&mut account).await;
-    match fetch_free_models(&settings.default_base_url, &account.token).await {
-        Some(set) if !set.is_empty() => {
-            if let Ok(mut g) = free_models_cache().lock() {
-                *g = Some((Instant::now(), set.clone()));
+    match fetch_models_value(&settings.default_base_url, &account.token).await {
+        Some(v) => {
+            let list = model_info_from_value(&v);
+            // 同步刷新路由用的免费集合缓存（倍率 x0.00 的 id）
+            if let Some(set) = free_ids_from_value(&v) {
+                if let Ok(mut g) = free_models_cache().lock() {
+                    *g = Some((Instant::now(), set));
+                }
+            }
+            if let Ok(mut g) = all_models_cache().lock() {
+                *g = Some((Instant::now(), list.clone()));
             }
             Ok(FreeModelsReport {
-                models: sorted_models(&set),
+                models: list,
                 source: "fetched".into(),
             })
         }
         _ => Ok(FreeModelsReport {
             models: FALLBACK_FREE_MODELS
                 .iter()
-                .map(|s| s.to_string())
+                .map(|s| ModelInfo {
+                    id: s.to_string(),
+                    free: true,
+                    multiplier: "x0.00".into(),
+                })
                 .collect(),
             source: "fallback".into(),
         }),
