@@ -132,13 +132,29 @@ body {
   flex: 0 0 auto;
   font-size: 14px;
 }
-/* 接管生效中的小圆点提示 */
+/* 导航项右侧的小圆点：绿点 = 接管生效中，红点 = 有新版本可更新 */
 .nav-dot {
   margin-left: auto;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--ok);
+}
+/* 新版本提醒：轻微脉冲，比一个静态点更容易被余光扫到 */
+.nav-dot.err {
+  background: var(--err);
+  animation: nav-dot-pulse 1.8s ease-in-out infinite;
+}
+@keyframes nav-dot-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.55;
+  }
 }
 /* 右侧主区 */
 .main {
@@ -844,11 +860,6 @@ body {
 }
 
 /* 网络急救：诊断结果与恢复轨迹 */
-.net-ok {
-  margin: 0 0 12px;
-  font-size: 13px;
-  color: var(--ok);
-}
 .net-list {
   list-style: none;
   margin: 0 0 10px;
@@ -940,10 +951,7 @@ body {
   color: var(--muted);
 }
 
-/* 网络急救页：整体状态 Banner + 卡片容器 */
-.netfix-intro {
-  margin-bottom: 14px;
-}
+/* 网络急救：整体状态 Banner（现嵌在设置页卡片里） */
 .status-banner {
   display: flex;
   align-items: flex-start;
@@ -989,15 +997,16 @@ body {
   line-height: 1.55;
 }
 
-.net-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 2px 16px;
-  margin-bottom: 12px;
+/* 结果区：直接坐在设置页卡片的 .set-group 里，不再自套一层边框卡片 */
+.netfix-body {
+  padding: 2px 0 14px;
 }
-.net-card .net-list {
+.netfix-body .net-list {
   max-height: none;
+  margin: 0;
+}
+.netfix-body .net-steps {
+  margin-top: 10px;
 }
 .net-steps-title {
   font-size: 13px;

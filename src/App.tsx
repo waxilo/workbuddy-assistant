@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { Account, ImportItem, ImportReport, Settings } from "./types";
@@ -16,15 +16,14 @@ import {
   appVersion,
 } from "./api";
 import { accountLabel, tally, type ConfirmReq, type Toast } from "./common";
+import { nextUpdateNotice, probeUpdate, type UpdateNotice } from "./updater";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TakeoverPage } from "./pages/TakeoverPage";
-import { NetfixPage } from "./pages/NetfixPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import {
   IconCheck,
   IconSwap,
-  IconActivity,
   IconList,
   IconGear,
   IconUserPlus,
@@ -38,17 +37,17 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 /**
  * 应用外壳：左侧导航栏 + 右侧内容区。
  *
- * 页面（tab）承载常驻功能：账号签到 / 智能接管 / 网络急救 / 签到日志 / 设置；
+ * 页面（tab）承载常驻功能：账号签到 / 智能接管 / 签到日志 / 设置
+ * （网络急救已作为一张卡并入设置页，见 NetfixCard）；
  * 弹窗只留给「做完即走」的任务流（登录新账号、导入本机账号、危险操作确认）。
  */
-type Page = "accounts" | "takeover" | "netfix" | "logs" | "settings";
+type Page = "accounts" | "takeover" | "logs" | "settings";
 
 type Modal = { type: "local" } | { type: "oauth" } | null;
 
 const NAV: { key: Page; label: string }[] = [
   { key: "accounts", label: "账号签到" },
   { key: "takeover", label: "智能接管" },
-  { key: "netfix", label: "网络急救" },
   { key: "logs", label: "签到日志" },
   { key: "settings", label: "设置" },
 ];
@@ -56,7 +55,6 @@ const NAV: { key: Page; label: string }[] = [
 const PAGE_ICON: Record<Page, ReactNode> = {
   accounts: <IconCheck />,
   takeover: <IconSwap />,
-  netfix: <IconActivity />,
   logs: <IconList />,
   settings: <IconGear />,
 };
@@ -64,10 +62,16 @@ const PAGE_ICON: Record<Page, ReactNode> = {
 const PAGE_TITLES: Record<Page, string> = {
   accounts: "账号签到",
   takeover: "智能接管",
-  netfix: "网络急救",
   logs: "签到日志",
   settings: "设置",
 };
+
+/**
+ * 后台检查更新的节奏：启动后先等 8 秒（避开启动期的签到/续签抢网络），此后每 6 小时一次。
+ * 定成常驻轮询是因为应用是「后台常驻」形态——没人会天天主动去点「检查更新」。
+ */
+const UPDATE_FIRST_DELAY_MS = 8_000;
+const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export default function App() {
   const [page, setPage] = useState<Page>("accounts");
@@ -80,6 +84,8 @@ export default function App() {
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [busyAll, setBusyAll] = useState(false);
   const [busyRefresh, setBusyRefresh] = useState(false);
+  /** 后台轮询发现的新版本（驱动侧边栏「设置」上的小红点） */
+  const [updateNotice, setUpdateNotice] = useState<UpdateNotice>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [toast, setToast] = useState<Toast>(null);
   const [confirmReq, setConfirmReq] = useState<ConfirmReq | null>(null);
@@ -125,8 +131,48 @@ export default function App() {
     load();
   }, [load]);
 
+  // 后台轮询要判断「用户此刻在不在设置页」，但不能把 page 写进依赖（会让定时器反复重建）
+  const pageRef = useRef(page);
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+
+  // 后台定时检查新版本，只为点亮侧边栏那颗小红点。
+  // 窗口被隐藏时 webview 仍在跑（点红按钮只是 hide、不销毁窗口），所以常驻期间定时器一直有效。
+  useEffect(() => {
+    let alive = true;
+    const run = async () => {
+      try {
+        const version = await probeUpdate();
+        if (!alive) return;
+        setUpdateNotice((prev) =>
+          nextUpdateNotice(prev, version, pageRef.current === "settings")
+        );
+      } catch (e) {
+        // 轮询失败一律静默：网络抖动、代理不通都是常态，不该弹提示打扰用户。
+        // 想看明确报错就到设置页手动点「检查更新」。
+        console.warn("后台检查更新失败：", e);
+      }
+    };
+    const first = window.setTimeout(run, UPDATE_FIRST_DELAY_MS);
+    const timer = window.setInterval(run, UPDATE_INTERVAL_MS);
+    return () => {
+      alive = false;
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const reloadSettings = useCallback(async () => {
     setSettings(await getSettings());
+  }, []);
+
+  /** 小红点：后台查到了新版本，且用户还没看过 */
+  const showUpdateDot = updateNotice !== null && !updateNotice.seen;
+
+  /** 用户进设置页就算看过这条提醒（设置页里仍写明有新版本，信息不丢） */
+  const markUpdateSeen = useCallback(() => {
+    setUpdateNotice((n) => (n && !n.seen ? { ...n, seen: true } : n));
   }, []);
 
   // 启动时若开启“自动签到”，则对全部账号执行一次
@@ -352,12 +398,20 @@ export default function App() {
                 setPage(n.key);
                 // 从导航进入日志页时不带账号预设（只有从账号条目跳转才带）
                 if (n.key === "logs") setLogsInitial(null);
+                // 进设置页 = 看到了更新提醒
+                if (n.key === "settings") markUpdateSeen();
               }}
             >
               <span className="nav-icon">{PAGE_ICON[n.key]}</span>
               {n.label}
               {n.key === "takeover" && settings?.proxy_enabled && (
                 <span className="nav-dot" title="接管生效中" />
+              )}
+              {n.key === "settings" && showUpdateDot && (
+                <span
+                  className="nav-dot err"
+                  title={`有新版本 v${updateNotice?.version} 可更新`}
+                />
               )}
             </button>
           ))}
@@ -486,13 +540,6 @@ export default function App() {
               onToast={showToast}
             />
           )}
-          {page === "netfix" && (
-            <NetfixPage
-              askConfirm={askConfirm}
-              onReloadSettings={reloadSettings}
-              onToast={showToast}
-            />
-          )}
           {page === "logs" && (
             <LogsPage
               accounts={accounts}
@@ -513,6 +560,12 @@ export default function App() {
                 }
               }}
               onToast={showToast}
+              askConfirm={askConfirm}
+              onReloadSettings={reloadSettings}
+              updateVersion={updateNotice?.version ?? null}
+              onUpdateResult={(v) =>
+                setUpdateNotice(v ? { version: v, seen: true } : null)
+              }
             />
           )}
         </main>

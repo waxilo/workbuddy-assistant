@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Settings } from "../types";
 import { setAutostart, getAutostart, testNotify } from "../api";
 import { checkAndInstall, downloadProgress, type UpdateProgress } from "../updater";
-import { formatBytes, type Toast } from "../common";
+import { formatBytes, type ConfirmReq, type Toast } from "../common";
 import {
   IconCalendar,
   IconShield,
@@ -12,78 +12,38 @@ import {
   IconInfo,
   IconDownload,
 } from "../components/Icons";
-
-/** 开关控件：复用全局 .switch 样式（与智能接管页一致） */
-function Toggle({
-  checked,
-  disabled,
-  onChange,
-  title,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  onChange: (v: boolean) => void;
-  title?: string;
-}) {
-  return (
-    <label className="switch" title={title}>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <span className="track">
-        <span className="thumb" />
-      </span>
-    </label>
-  );
-}
-
-/** 一行设置：左侧标题 + 说明，右侧控件 */
-function Row({
-  title,
-  desc,
-  ctrl,
-  sub,
-  bare,
-}: {
-  title: string;
-  desc?: string;
-  ctrl: React.ReactNode;
-  /** 嵌套行：带浅色背景，视觉上从属于上一项开关 */
-  sub?: boolean;
-  /** 展开区内部的行：不显示分隔线 */
-  bare?: boolean;
-}) {
-  return (
-    <div className={`set-row${sub ? " sub" : ""}${bare ? " in-expand" : ""}`}>
-      <div className="set-row-main">
-        <div className="set-row-title">{title}</div>
-        {desc && <div className="set-row-desc">{desc}</div>}
-      </div>
-      <div className="set-row-ctrl">{ctrl}</div>
-    </div>
-  );
-}
+import { Row, Toggle } from "../components/SettingsControls";
+import { NetfixCard } from "../components/NetfixCard";
 
 /**
  * 「设置」页：定时签到 / 通知 / 风控 / 自启动等常规配置。
  *
  * 卡片式分组布局：每个主题一张卡，每条设置左右分栏（左侧标题 + 说明，右侧控件），
- * 开关统一用 .switch 切换。网络急救与智能接管已独立成页，本页不再混排；
- * 接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
+ * 开关统一用 .switch 切换。网络急救作为一张卡收敛在本页底部（见 NetfixCard），
+ * 智能接管仍独立成页；接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
  */
 export function SettingsPage({
   version,
   settings,
   onSave,
   onToast,
+  askConfirm,
+  onReloadSettings,
+  updateVersion,
+  onUpdateResult,
 }: {
   version: string;
   settings: Settings;
   onSave: (s: Settings) => Promise<void>;
   onToast: (t: Toast) => void;
+  /** 网络急救的「一键恢复」是危险操作，复用全局自研确认框 */
+  askConfirm: (opts: Omit<ConfirmReq, "resolve">) => Promise<boolean>;
+  /** 恢复流程会安全关闭智能接管并落盘，需要重拉一份 settings 覆盖本地草稿 */
+  onReloadSettings: () => Promise<void>;
+  /** 后台轮询查到的版本号（就是点亮侧边栏红点的那条），这里用于打开页面就有提示 */
+  updateVersion: string | null;
+  /** 把手动检查的结果回传外层：null = 已是最新，据此清掉后台留下的过期提醒 */
+  onUpdateResult: (version: string | null) => void;
 }) {
   const [auto, setAuto] = useState(settings.auto_checkin_on_start);
   const [schedOn, setSchedOn] = useState(settings.schedule_enabled);
@@ -110,6 +70,14 @@ export function SettingsPage({
   // 每次改动都基于它合并后自动保存，避免覆盖「智能接管」页改过的值。
   const draftRef = useRef<Settings>({ ...settings });
   const saveTimer = useRef<number | null>(null);
+
+  // 外部来源改了 settings 时要同步草稿：网络急救的「一键恢复」会安全关闭智能接管并落盘，
+  // 若草稿仍攥着旧的 proxy_enabled=true，用户随后改任意一项都会把它写回去——等于把反代「复活」。
+  // 保存走的是 setSettings(服务端返回值)，这里同步到的始终是权威值，不会覆盖正在编辑的内容
+  //（patch 用闭包里的 next 落盘，不依赖同步时机）。
+  useEffect(() => {
+    draftRef.current = { ...settings };
+  }, [settings]);
 
   useEffect(() => {
     getAutostart()
@@ -169,7 +137,13 @@ export function SettingsPage({
     setUpdateBusy(true);
     setUpdateStatus({ status: "checking", message: "正在检查更新…" });
     try {
-      await checkAndInstall((p) => setUpdateStatus(p));
+      await checkAndInstall((p) => {
+        setUpdateStatus(p);
+        // 手动检查的结论要回传外层，否则侧边栏那颗红点会一直按后台那份过期结果亮着：
+        // 查到新版本 → 点亮（用户已经在看，直接算已读）；确认已是最新 → 清掉。
+        if (p.status === "available") onUpdateResult(p.version ?? null);
+        else if (p.status === "no-update") onUpdateResult(null);
+      });
     } finally {
       setUpdateBusy(false);
     }
@@ -182,7 +156,7 @@ export function SettingsPage({
     <section className="panel-page set-page">
       <p className="set-intro">
         <IconInfo size={14} />
-        定时签到、多账号风控与通知等常规配置。智能接管相关配置请在「智能接管」页调整。
+        定时签到、多账号风控、签到通知、应用更新与网络急救。智能接管相关配置请在「智能接管」页调整。
       </p>
 
       {/* 签到自动化 */}
@@ -412,14 +386,18 @@ export function SettingsPage({
         <div className="set-group">
           <Row
             title={version ? `当前版本 v${version}` : "当前版本"}
-            desc="检查 GitHub Release 是否有可用更新"
+            desc={
+              updateVersion
+                ? `后台已发现新版本 v${updateVersion}，点右侧按钮立即更新。`
+                : "应用会自动检查更新，发现新版本会在侧边栏「设置」上点亮一颗小红点。"
+            }
             ctrl={
               <button
-                className="btn small"
+                className={`btn small${updateVersion ? " primary" : ""}`}
                 disabled={updateBusy}
                 onClick={() => void doUpdate()}
               >
-                {updateBusy ? "检查中…" : "检查更新"}
+                {updateBusy ? "检查中…" : updateVersion ? "立即更新" : "检查更新"}
               </button>
             }
           />
@@ -455,6 +433,13 @@ export function SettingsPage({
           )}
         </div>
       </div>
+
+      {/* 网络急救：诊断类工具，收在设置页底部 */}
+      <NetfixCard
+        askConfirm={askConfirm}
+        onReloadSettings={onReloadSettings}
+        onToast={onToast}
+      />
 
       {err && <p className="form-err">{err}</p>}
       {(saving || saved) && (
