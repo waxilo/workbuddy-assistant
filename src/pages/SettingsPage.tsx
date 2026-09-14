@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Settings } from "../types";
 import { setAutostart, getAutostart, testNotify } from "../api";
+import { checkAndInstall, type UpdateProgress } from "../updater";
 import type { Toast } from "../common";
 import {
   IconCalendar,
@@ -9,6 +10,7 @@ import {
   IconCheck,
   IconAlertTriangle,
   IconInfo,
+  IconDownload,
 } from "../components/Icons";
 
 /** 开关控件：复用全局 .switch 样式（与智能接管页一致） */
@@ -73,10 +75,12 @@ function Row({
  * 接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
  */
 export function SettingsPage({
+  version,
   settings,
   onSave,
   onToast,
 }: {
+  version: string;
   settings: Settings;
   onSave: (s: Settings) => Promise<void>;
   onToast: (t: Toast) => void;
@@ -98,6 +102,9 @@ export function SettingsPage({
   // 开机自启动是「操作系统状态」，不属于 settings.json，改一次立即生效
   const [autostart, setAutostartOn] = useState<boolean | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
+  // 应用更新：状态文本 + 下载进度
+  const [updateStatus, setUpdateStatus] = useState<UpdateProgress | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   // 当前草稿：含其它页托管的字段（proxy_* / billing_account_ids 等），原样透传，
   // 每次改动都基于它合并后自动保存，避免覆盖「智能接管」页改过的值。
@@ -157,6 +164,21 @@ export function SettingsPage({
       setTesting(false);
     }
   };
+
+  const doUpdate = async () => {
+    setUpdateBusy(true);
+    setUpdateStatus({ status: "checking", message: "正在检查更新…" });
+    try {
+      await checkAndInstall((p) => setUpdateStatus(p));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const updatePercent =
+    updateStatus?.status === "downloading" && updateStatus.total && updateStatus.total > 0
+      ? Math.min(100, Math.round(((updateStatus.downloaded ?? 0) / updateStatus.total) * 100))
+      : 0;
 
   return (
     <section className="panel-page set-page">
@@ -373,6 +395,60 @@ export function SettingsPage({
                   />
                 }
               />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 应用更新 */}
+      <div className="set-card">
+        <div className="set-card-head">
+          <span className="set-card-icon">
+            <IconDownload size={20} />
+          </span>
+          <div>
+            <div className="set-card-title">应用更新</div>
+            <div className="set-card-sub">检查并安装来自 GitHub Release 的新版本</div>
+          </div>
+        </div>
+        <div className="set-group">
+          <Row
+            title={version ? `当前版本 v${version}` : "当前版本"}
+            desc="检查 GitHub Release 是否有可用更新"
+            ctrl={
+              <button
+                className="btn small"
+                disabled={updateBusy}
+                onClick={() => void doUpdate()}
+              >
+                {updateBusy ? "检查中…" : "检查更新"}
+              </button>
+            }
+          />
+          {updateStatus && (
+            <div className="upd-row">
+              <div
+                className={`upd-status ${
+                  updateStatus.status === "error"
+                    ? "err"
+                    : updateStatus.status === "ok" || updateStatus.status === "updated"
+                    ? "ok"
+                    : ""
+                }`}
+              >
+                {updateStatus.message}
+              </div>
+              {updateStatus.status === "downloading" && (
+                <div className="upd-progress-wrap">
+                  <div
+                    className="upd-progress-bar"
+                    style={{ width: `${updatePercent}%` }}
+                  />
+                </div>
+              )}
+              {updateStatus.status === "downloading" && updateStatus.total && updateStatus.total > 0 && (
+                <div className="upd-progress-text">{updatePercent}%</div>
+              )}
             </div>
           )}
         </div>

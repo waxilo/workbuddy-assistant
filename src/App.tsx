@@ -15,7 +15,6 @@ import {
   saveSettings as saveSettingsApi,
   appVersion,
 } from "./api";
-import { checkAndInstall } from "./updater";
 import { accountLabel, tally, type ConfirmReq, type Toast } from "./common";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TakeoverPage } from "./pages/TakeoverPage";
@@ -324,31 +323,6 @@ export default function App() {
     }
   }, [load, showToast]);
 
-  // 检查更新：所有通知统一走顶部 toast（底部通知条已移除）。
-  // 下载中的进度事件只提示一次，避免刷屏。
-  const onUpdate = useCallback(async () => {
-    let downloadShown = false;
-    await checkAndInstall((p) => {
-      if (p.status === "checking") return;
-      if (p.status === "downloading") {
-        if (!downloadShown) {
-          downloadShown = true;
-          showToast({ kind: "info", text: p.message });
-        }
-        return;
-      }
-      showToast({
-        kind:
-          p.status === "error"
-            ? "err"
-            : p.status === "no-update"
-            ? "info"
-            : "ok",
-        text: p.message,
-      });
-    });
-  }, [showToast]);
-
   const saveSettings = useCallback(async (s: Settings) => {
     // 设置页已改为「改动自动保存」，这里只负责落盘并刷新内存中的 settings，
     // 不再弹成功 toast（每次改动都弹会刷屏）。失败提示由设置页兜底。
@@ -388,13 +362,6 @@ export default function App() {
             </button>
           ))}
         </nav>
-
-        <div className="sidebar-foot">
-          <button className="btn ghost block" onClick={onUpdate}>
-            检查更新
-          </button>
-          <div className="side-count">共 {accounts.length} 个账号</div>
-        </div>
       </aside>
 
       <div className="main">
@@ -536,6 +503,7 @@ export default function App() {
           )}
           {page === "settings" && settings && (
             <SettingsPage
+              version={version}
               settings={settings}
               onSave={async (s) => {
                 try {

@@ -38,13 +38,21 @@ export async function checkAndInstall(
   });
 
   try {
-    onProgress({ status: "downloading", message: "正在下载更新…" });
+    let downloaded = 0;
+    onProgress({ status: "downloading", message: "正在下载更新…", downloaded: 0 });
     await update.downloadAndInstall((event) => {
       if (event.event === "Progress") {
-        onProgress({ status: "downloading", message: "正在下载更新…" });
+        downloaded += (event.data as { chunkLength: number }).chunkLength;
+        onProgress({
+          status: "downloading",
+          message: "正在下载更新…",
+          downloaded,
+          total: (event.data as { contentLength?: number }).contentLength,
+        });
+      } else if (event.event === "Finished") {
+        onProgress({ status: "installing", message: "正在安装更新…" });
       }
     });
-    onProgress({ status: "installing", message: "正在安装更新…" });
   } catch (e) {
     onProgress({ status: "error", message: "更新失败：" + errMsg(e) });
     return;

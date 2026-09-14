@@ -140,19 +140,6 @@ body {
   border-radius: 50%;
   background: var(--ok);
 }
-.sidebar-foot {
-  margin-top: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 0 4px;
-}
-.side-count {
-  text-align: center;
-  font-size: 12px;
-  color: var(--muted);
-}
-
 /* 右侧主区 */
 .main {
   flex: 1;
@@ -1831,4 +1818,39 @@ body {
   border-top-color: transparent;
   animation: spin 0.7s linear infinite;
   display: inline-block;
+}
+
+/* ── 设置页：应用更新进度条 ── */
+.upd-row {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.upd-status {
+  font-size: 13px;
+  color: var(--text);
+}
+.upd-status.ok {
+  color: var(--ok);
+}
+.upd-status.err {
+  color: var(--err);
+}
+.upd-progress-wrap {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.upd-progress-bar {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+.upd-progress-text {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
 }
