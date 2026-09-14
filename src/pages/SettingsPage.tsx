@@ -431,7 +431,7 @@ export function SettingsPage({
                 className={`upd-status ${
                   updateStatus.status === "error"
                     ? "err"
-                    : updateStatus.status === "ok" || updateStatus.status === "updated"
+                    : updateStatus.status === "updated"
                     ? "ok"
                     : ""
                 }`}
