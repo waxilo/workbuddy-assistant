@@ -317,6 +317,12 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
     // SSE 长对话可能持续数分钟，写超时要给得足够宽
     let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
 
+    // 数据目录：选账号 / 写接管日志都要用；取不到直接 500，不再读请求
+    let Ok(dir) = commands::try_data_dir(&app) else {
+        respond(&mut stream, 500, "text/plain", b"internal error", &[]);
+        return;
+    };
+
     // 1. 读完请求头（+ body）
     let mut buf = Vec::with_capacity(8 * 1024);
     let mut tmp = [0u8; 8192];
@@ -338,12 +344,15 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
         }
     };
     let Some(req) = req else {
+        // 诊断用：400 出口原本静默，这里把 offending 请求的前 512 字节落盘，
+        // 便于复现「400 bad request」是请求解析失败，还是上游（腾讯）的 400 被透传。
+        let head = String::from_utf8_lossy(&buf[..buf.len().min(512)]);
+        let _ = stealth::journal_append(
+            &dir,
+            "proxy_bad_request",
+            &format!("请求解析失败，回 400；前 512 字节：\n{head}"),
+        );
         respond(&mut stream, 400, "text/plain", b"bad request", &[]);
-        return;
-    };
-
-    let Ok(dir) = commands::try_data_dir(&app) else {
-        respond(&mut stream, 500, "text/plain", b"internal error", &[]);
         return;
     };
 
@@ -724,6 +733,14 @@ fn stream_response(
     path: &str,
 ) {
     let status = resp.status().as_u16();
+    // 诊断用：上游返回 4xx/5xx 时落盘，便于区分「代理自己回的 400」与「上游 400 透传」
+    if status >= 400 {
+        let _ = stealth::journal_append(
+            dir,
+            "proxy_upstream_status",
+            &format!("上游返回 {status}：{host}{path}"),
+        );
+    }
     let ctype = resp
         .headers()
         .get("content-type")
