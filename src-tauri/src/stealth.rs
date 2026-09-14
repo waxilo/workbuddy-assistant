@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// 心跳间隔：反代监督线程按此频率续租
@@ -57,7 +58,17 @@ pub fn journal_path(data_dir: &Path) -> PathBuf {
     data_dir.join(JOURNAL_FILE)
 }
 
+/// 追加是「整文件 read-modify-write」，多个连接线程并发写会互相覆盖（后写的 rename
+/// 直接抹掉前一条），而这份日志恰好是排查接管问题**唯一的**证据源。用一把进程内锁
+/// 把追加串行化：日志只可能少写（静默失败），但绝不能因为并发而丢事件。
+static JOURNAL_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn journal_read(data_dir: &Path) -> Vec<JournalEvent> {
+    read_events(data_dir)
+}
+
+/// 不加锁的读：只读路径不必阻塞，且 `rename` 是原子的，读者只会看到完整的新旧版本之一。
+fn read_events(data_dir: &Path) -> Vec<JournalEvent> {
     let Ok(text) = fs::read_to_string(journal_path(data_dir)) else {
         return Vec::new();
     };
@@ -72,7 +83,11 @@ pub fn journal_append(data_dir: &Path, event: &str, detail: &str) {
         event: event.to_string(),
         detail: detail.to_string(),
     };
-    let mut all = journal_read(data_dir);
+    // 锁被毒化（某线程持锁时 panic）不能成为丢日志的理由：诊断代码必须比它诊断的
+    // 那条路径更能扛。
+    let _guard = JOURNAL_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut all = read_events(data_dir);
     all.push(e);
     if all.len() > JOURNAL_MAX {
         let drop = all.len() - JOURNAL_MAX;
@@ -84,12 +99,16 @@ pub fn journal_append(data_dir: &Path, event: &str, detail: &str) {
         .map(|l| format!("{l}\n"))
         .collect();
     let target = journal_path(data_dir);
-    if fs::create_dir_all(data_dir).is_ok() {
-        let tmp = data_dir.join(format!("{JOURNAL_FILE}.tmp"));
-        if fs::write(&tmp, body).is_ok() {
-            let _ = fs::rename(&tmp, &target);
-        }
+    if fs::create_dir_all(data_dir).is_err() {
+        return;
     }
+    let tmp = data_dir.join(format!("{JOURNAL_FILE}.tmp"));
+    if fs::write(&tmp, &body).is_ok() && fs::rename(&tmp, &target).is_ok() {
+        return;
+    }
+    // Windows 上 rename 会因目标文件被占用（如展示层正在读）而失败；此时退化成直写，
+    // 宁可短暂失去原子性，也不能把这条证据丢掉。
+    let _ = fs::write(&target, &body);
 }
 
 /// 接管租约。落在**本应用**的数据目录里，不进 WorkBuddy 的配置。
@@ -663,6 +682,45 @@ mod tests {
         let all = journal_read(&data);
         assert_eq!(all.len(), JOURNAL_MAX);
         assert_eq!(all.last().unwrap().detail, format!("e{}", JOURNAL_MAX + 9));
+
+        let _ = fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// 回归：日志是 `read-modify-write`，多线程并发追加若不串行化就会互相覆盖。
+    /// 这直接对应线上场景 —— 代理每个连接一个线程，出故障时恰恰是并发最高的时候。
+    #[test]
+    fn journal_loses_nothing_under_concurrency() {
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+
+        let (home, data) = sandbox();
+        let data = Arc::new(data);
+        let threads = 8usize;
+        // 8 × 25 = 200 == JOURNAL_MAX：正好卡在不触发裁剪的上限，任何一条丢失都会暴露
+        let per_thread = JOURNAL_MAX / threads;
+
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let dir = Arc::clone(&data);
+                std::thread::spawn(move || {
+                    for i in 0..per_thread {
+                        journal_append(dir.as_path(), "proxy_request", &format!("t{t}-i{i}"));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("追加线程 panic");
+        }
+
+        let all = journal_read(&data);
+        let expected: BTreeSet<String> = (0..threads)
+            .flat_map(|t| (0..per_thread).map(move |i| format!("t{t}-i{i}")))
+            .collect();
+        let actual: BTreeSet<String> = all.iter().map(|e| e.detail.clone()).collect();
+        assert_eq!(actual, expected, "并发追加丢事件（缺条目见上方集合差异）");
+        assert_eq!(all.len(), threads * per_thread, "并发追加出现重复条目");
+        assert!(all.iter().all(|e| e.event == "proxy_request"), "事件名被串改");
 
         let _ = fs::remove_dir_all(home.parent().unwrap());
     }
