@@ -167,6 +167,9 @@ pub(crate) fn merge_import(accounts: &mut Vec<Account>, items: Vec<ImportItem>) 
                 if a.base_url.is_none() {
                     a.base_url = it.host.clone().filter(|s| !s.trim().is_empty());
                 }
+                // 导入 = 重新同步：丢弃本地缓存的签到结果，避免陈旧的「今天失败」记录
+                // 在状态列直接显示「签到失败」（真实状态由导入后的 refreshAll 以服务端为准重写）
+                a.last = None;
                 updated += 1;
             }
             None => {
@@ -189,6 +192,8 @@ pub(crate) fn merge_import(accounts: &mut Vec<Account>, items: Vec<ImportItem>) 
                     base_url: it.host.filter(|s| !s.trim().is_empty()),
                     created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
                     last: None,
+                    credit_snapshot: None,
+                    checked_today: None,
                 });
                 added += 1;
             }
@@ -330,6 +335,8 @@ mod import_tests {
             expires_at: None,
             base_url: None,
             created_at: String::new(),
+            credit_snapshot: None,
+            checked_today: None,
             last: None,
         }
     }
@@ -492,9 +499,10 @@ pub async fn refresh_all(app: AppHandle) -> Result<Vec<Account>, String> {
         let host = account_host(&accounts[i]);
         // 1) 积分快照：剩余积分 + 最早过期时间（持久化，供路由与展示）
         let snap = checkin::fetch_credit_snapshot(&client, &host, &accounts[i].token).await;
+        // 2) 积分余量（UI「剩余积分」列）：用快照里的 credits 回填（在把 snap 移入 credit_snapshot 前读出）
+        let balance_from_snap = snap.credits;
         accounts[i].credit_snapshot = Some(snap);
-        // 2) 积分余量（UI「剩余积分」列）：用快照里的 credits 回填
-        if let Some(b) = snap.credits {
+        if let Some(b) = balance_from_snap {
             let rec = accounts[i].last.get_or_insert_with(|| accounts::CheckinRecord {
                 success: false,
                 already: false,

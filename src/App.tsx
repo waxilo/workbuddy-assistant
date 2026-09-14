@@ -313,6 +313,8 @@ export default function App() {
       if (typeof picked !== "string") return;
       const report = await importAccountsFile(picked);
       await load();
+      // 导入后补查真实签到状态（与 importItems 一致），避免陈旧本地状态直接显示「签到失败」
+      void refreshAll();
       showToast({
         kind: "ok",
         text: `导入完成：新增 ${report.added}，更新 ${report.updated}`,

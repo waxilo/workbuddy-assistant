@@ -145,6 +145,8 @@ mod tests {
             expires_at: None,
             base_url: None,
             created_at: String::new(),
+            credit_snapshot: None,
+            checked_today: None,
             last: rec,
         }
     }

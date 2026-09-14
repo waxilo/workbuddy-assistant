@@ -856,7 +856,7 @@ async fn choose_account(
     ban: &[String],
 ) -> Option<crate::accounts::Account> {
     let settings = accounts::load_settings(dir);
-    let all = accounts::load_accounts(dir);
+    let mut all = accounts::load_accounts(dir);
     if all.is_empty() {
         return None;
     }
@@ -1048,6 +1048,8 @@ mod tests {
             expires_at: None,
             base_url: None,
             created_at: String::new(),
+            credit_snapshot: None,
+            checked_today: None,
             last: None,
         };
         let all = vec![mk("a"), mk("b"), mk("c")];
@@ -1072,6 +1074,8 @@ mod tests {
             expires_at: None,
             base_url: None,
             created_at: String::new(),
+            credit_snapshot: None,
+            checked_today: None,
             last: None,
         };
         let all = vec![mk("a"), mk("b"), mk("c")];
@@ -1258,6 +1262,8 @@ mod tests {
             expires_at: None,
             base_url: None,
             created_at: String::new(),
+            credit_snapshot: None,
+            checked_today: None,
             last: None,
         };
         stream_response(
