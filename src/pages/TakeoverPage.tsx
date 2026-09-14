@@ -29,7 +29,12 @@ function eventKind(e: JournalEvent): {
       return { label: "重启 WorkBuddy", cls: "restart" };
     case "proxy_upstream_error":
     case "proxy_stream_error":
+    case "proxy_conn_setup_failed":
+    case "proxy_bad_request":
       return { label: "代理错误", cls: "err" };
+    // 客户端连上后迟迟不发请求头（此前会被误判成 400，现改为 408 + 本事件）
+    case "proxy_head_stalled":
+      return { label: "请求卡住", cls: "err" };
     default:
       return { label: "事件", cls: "restart" };
   }
@@ -41,10 +46,11 @@ function normalizeBilling(list: string[], allIds: string[]): string[] {
 }
 
 /**
- * 「智能接管」页：顶部一条紧凑控制条（小开关 + 状态 + 扣费账号摘要 + 端口），
+ * 「智能接管」页：顶部一条紧凑控制条（开关 + 状态 + 扣费账号 / 限流切换两颗摘要胶囊 + 端口），
  * 下方「接管动态」铺满剩余空间（列表内部滚动、滚动条隐藏）。
- * 没有保存按钮：开关拨动立即应用；端口仅在关闭时可改（失焦即存）；
- * 扣费账号在弹框里点「保存」立即生效。
+ * 多选类配置一律收进弹框、不在页面上直接铺开，避免把事件流挤没：
+ * 开关拨动立即应用；端口仅在关闭时可改（失焦即存）；
+ * 扣费账号、限流切换模型在各自弹框里点「保存」才落库生效。
  */
 export function TakeoverPage({
   settings,
@@ -74,8 +80,10 @@ export function TakeoverPage({
   const [err, setErr] = useState("");
   // 接管动态手动刷新：独立于 15s 自动轮询，点按即重拉状态与事件流
   const [feedBusy, setFeedBusy] = useState(false);
-  // 限流切换说明弹窗：展示支持无感切换的免费模型，支持手动刷新
-  const [fmOpen, setFmOpen] = useState(false);
+  // 限流切换模型弹窗（草稿制：打开复制当前值，点「保存」才落库生效）
+  const [mdlOpen, setMdlOpen] = useState(false);
+  const [mdlDraft, setMdlDraft] = useState<string[] | null>(null);
+  // 模型清单：从网关动态拉取，弹窗列表与控制条摘要共用
   const [fm, setFm] = useState<FreeModelsReport | null>(null);
   const [fmBusy, setFmBusy] = useState(false);
   // 限流切换模型勾选：用户额外启用的付费模型（免费模型恒生效，不进这里）
@@ -103,7 +111,7 @@ export function TakeoverPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 接管页打开即拉取模型列表（供「限流切换模型」勾选区使用） */
+  /** 接管页打开即拉取模型列表（控制条摘要 + 限流切换弹窗共用） */
   useEffect(() => {
     void loadFreeModels(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -152,19 +160,20 @@ export function TakeoverPage({
     [onToast]
   );
 
-  /** 勾选 / 取消某个付费模型的限流切换；免费模型恒生效不可改。即拨即存。 */
-  const toggleModel = async (id: string) => {
-    const next = rlModels.includes(id)
-      ? rlModels.filter((x) => x !== id)
-      : [...rlModels, id];
-    setRlModels(next);
-    try {
-      const saved = await saveSettings(snapshot({ rate_limit_models: next }));
-      onSettings(saved);
-    } catch (e) {
-      setRlModels(rlModels); // 回滚
-      onToast({ kind: "err", text: "保存限流模型失败：" + String(e) });
-    }
+  /** 弹窗里勾/去勾某个付费模型（只改草稿；免费模型恒生效不可点） */
+  const toggleDraftModel = (id: string) =>
+    setMdlDraft((list) => {
+      const base = list ?? rlModels;
+      return base.includes(id)
+        ? base.filter((x) => x !== id)
+        : [...base, id];
+    });
+
+  /** 打开「限流切换模型」弹窗：草稿复制当前生效值，模型清单缺失则先拉取 */
+  const openModelPicker = () => {
+    setMdlDraft(rlModels);
+    setMdlOpen(true);
+    if (!fm) void loadFreeModels(false);
   };
 
   /** 组装一份以当前界面状态为准的设置 */
@@ -236,7 +245,28 @@ export function TakeoverPage({
     }
   };
 
-  /** 弹框草稿里勾/去勾（基准：草稿为空视为「当前全选」） */
+  /** 限流切换弹框「保存」：草稿落库立即生效（纯模型白名单，不需要重启） */
+  const doSaveModels = async () => {
+    if (mdlDraft == null) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const saved = await saveSettings(
+        snapshot({ rate_limit_models: mdlDraft })
+      );
+      onSettings(saved);
+      setRlModels(mdlDraft);
+      setMdlDraft(null);
+      setMdlOpen(false);
+      onToast({ kind: "ok", text: "限流切换模型已生效" });
+    } catch (e) {
+      onToast({ kind: "err", text: "保存限流模型失败：" + String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 扣费账号弹框草稿里勾/去勾（基准：草稿为空视为「当前全选」） */
   const toggleDraft = (id: string) =>
     setDraft((list) => {
       const base = list == null ? effective : list.length === 0 ? allIds : list;
@@ -254,6 +284,15 @@ export function TakeoverPage({
       : billing.length === 0
       ? `全部 ${accounts.length} 个（默认）`
       : `已选 ${billing.length} · 未选 ${accounts.length - billing.length}`;
+
+  /** 限流切换摘要（控制条上的胶囊按钮）：免费模型恒生效，付费模型按勾选数 */
+  const freeCount = fm?.models.filter((m) => m.free).length ?? 0;
+  const modelSummary =
+    fm == null
+      ? "加载中…"
+      : rlModels.length === 0
+      ? `${freeCount} 个免费（默认）`
+      : `${freeCount} 免费 · 付费 ${rlModels.length}`;
 
   /** 状态副文案 */
   const stateText = live
@@ -296,7 +335,7 @@ export function TakeoverPage({
 
   return (
     <section className="panel-page tk-page">
-      {/* ── 紧凑控制条：开关 + 状态 + 扣费账号 + 端口 ── */}
+      {/* ── 紧凑控制条：开关 + 状态 + 扣费账号 / 限流切换（弹窗入口）+ 端口 ── */}
       <div className={`tk-bar ${live ? "live" : ""}`}>
         <label
           className="switch"
@@ -330,6 +369,15 @@ export function TakeoverPage({
           <span className="ta-value">{billingSummary}</span>
           <span className="ta-edit">选择</span>
         </button>
+        <button
+          className="tk-accts"
+          title="0 积分模型默认享受 429 无感换号；付费模型在此勾选后同样生效"
+          onClick={openModelPicker}
+        >
+          <span className="ta-label">限流切换</span>
+          <span className="ta-value">{modelSummary}</span>
+          <span className="ta-edit">选择</span>
+        </button>
         <label
           className="tk-port"
           title={proxyOn ? "接管开启期间不允许修改端口；请先关闭接管" : "代理监听端口"}
@@ -349,65 +397,6 @@ export function TakeoverPage({
 
       {err && <p className="form-err">{err}</p>}
 
-      {/* ── 限流切换模型：勾选哪些模型享受 429 无感换号；免费模型锁定 ── */}
-      <div className="tk-section tk-models">
-        <div className="tk-sec-head">
-          <h3>限流切换模型</h3>
-          <span className="tk-sec-meta">
-            选中模型触发 429 时自动换备用账号重发；0 积分模型默认生效不可取消
-          </span>
-          <span className="spacer" />
-          <button
-            className="btn small ghost"
-            disabled={fmBusy}
-            title="重新从网关拉取模型列表"
-            onClick={() => void loadFreeModels(true)}
-          >
-            {fmBusy ? "刷新中…" : "刷新"}
-          </button>
-        </div>
-        {fm == null ? (
-          <p className="hint">加载中…（从网关拉取模型列表）</p>
-        ) : fm.models.length === 0 ? (
-          <p className="hint">暂未发现模型。</p>
-        ) : (
-          <ul className="rl-list">
-            {fm.models.map((m) => {
-              const checked = m.free || rlModels.includes(m.id);
-              return (
-                <li
-                  key={m.id}
-                  className={m.free ? "rl-item free" : "rl-item"}
-                  title={
-                    m.free
-                      ? "0 积分免费模型，恒享受限流切换，不可取消"
-                      : "勾选后该付费模型也享受 429 无感换号"
-                  }
-                  onClick={() => {
-                    if (!m.free) void toggleModel(m.id);
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    disabled={m.free}
-                    onChange={() => {
-                      if (!m.free) void toggleModel(m.id);
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                  <span className="rl-name">{m.id}</span>
-                  <span className={`rl-tag ${m.free ? "free" : "paid"}`}>
-                    {m.free ? "免费" : m.multiplier || "付费"}
-                  </span>
-                  {m.free && <span className="rl-lock">默认</span>}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
       {/* ── 接管动态：铺满剩余空间，列表内部滚动（滚动条隐藏） ── */}
       <div className="tk-section tk-feed">
         <div className="tk-sec-head">
@@ -421,16 +410,6 @@ export function TakeoverPage({
             onClick={() => void doRefreshFeed()}
           >
             {feedBusy ? "刷新中…" : "刷新"}
-          </button>
-          <button
-            className="btn small ghost"
-            title="查看哪些模型支持限流无感切换（可刷新拉取最新）"
-            onClick={() => {
-              setFmOpen(true);
-              if (!fm) void loadFreeModels(false);
-            }}
-          >
-            限流切换说明
           </button>
           <button
             className="btn small ghost"
@@ -545,15 +524,21 @@ export function TakeoverPage({
         </div>
       )}
 
-      {/* ── 限流切换说明弹框：免费模型列表 + 手动刷新 ── */}
-      {fmOpen && (
-        <div className="modal-mask" onClick={() => setFmOpen(false)}>
+      {/* ── 限流切换模型弹框（草稿制：点「保存」才生效） ── */}
+      {mdlOpen && (
+        <div
+          className="modal-mask"
+          onClick={() => {
+            setMdlDraft(null);
+            setMdlOpen(false);
+          }}
+        >
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>限流切换说明</h2>
+            <h2>限流切换模型</h2>
             <p className="hint">
               选中的模型触发限流（429）时，代理会将该账号冷却 10 分钟、自动换备用账号重发同一请求，对话完全无感；
               换号按「积分最早过期」优先（先消耗快过期的额度）。
-              0 积分（免费）模型默认全部生效、不可取消；付费模型在上方「限流切换模型」里勾选后同样生效。
+              0 积分（免费）模型默认全部生效、不可取消；付费模型勾选后同样生效。
               模型列表从网关动态拉取（缓存 1 小时），腾讯增删模型后点「刷新」即可同步。
             </p>
             {fm && (
@@ -565,6 +550,46 @@ export function TakeoverPage({
                   : "来源：内置兜底列表（网关拉取失败，可点「刷新」重试）"}
               </p>
             )}
+            {fm == null ? (
+              <p className="hint">加载中…（从网关拉取模型列表）</p>
+            ) : fm.models.length === 0 ? (
+              <p className="hint">暂未发现模型。</p>
+            ) : (
+              <ul className="rl-list">
+                {fm.models.map((m) => {
+                  const checked = m.free || (mdlDraft ?? rlModels).includes(m.id);
+                  return (
+                    <li
+                      key={m.id}
+                      className={m.free ? "rl-item free" : "rl-item"}
+                      title={
+                        m.free
+                          ? "0 积分免费模型，恒享受限流切换，不可取消"
+                          : "勾选后该付费模型也享受 429 无感换号"
+                      }
+                      onClick={() => {
+                        if (!m.free) toggleDraftModel(m.id);
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={m.free}
+                        onChange={() => {
+                          if (!m.free) toggleDraftModel(m.id);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <span className="rl-name">{m.id}</span>
+                      <span className={`rl-tag ${m.free ? "free" : "paid"}`}>
+                        {m.free ? "免费" : m.multiplier || "付费"}
+                      </span>
+                      {m.free && <span className="rl-lock">默认</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
             <div className="modal-actions">
               <button
                 className="btn"
@@ -574,8 +599,21 @@ export function TakeoverPage({
                 {fmBusy ? "刷新中…" : "刷新"}
               </button>
               <span className="spacer" />
-              <button className="btn primary" onClick={() => setFmOpen(false)}>
-                关闭
+              <button
+                className="btn"
+                onClick={() => {
+                  setMdlDraft(null);
+                  setMdlOpen(false);
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="btn primary"
+                disabled={busy || mdlDraft == null}
+                onClick={() => void doSaveModels()}
+              >
+                {busy ? "保存中…" : "保存"}
               </button>
             </div>
           </div>
