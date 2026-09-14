@@ -23,6 +23,10 @@
 //! **响应一律用 chunked 流式下发。** 对话是 SSE（`text/event-stream`），实测若缓冲成
 //! 一次性 body，CLI 会报 `Empty stream` 并拿不到任何输出。
 //!
+//! **accept 出来的连接必须显式复位成阻塞模式**：监听 socket 为了轮询配置开关必须
+//! 非阻塞，而 Windows 会把这个非阻塞状态**传染**给 accept 出来的连接（Linux 不会）。
+//! 不复位时，只要请求字节还没到齐就被判成「请求非法」→ 400 bad request。详见 `configure_conn`。
+//!
 //! 实现：`std::net::TcpListener` 手写 HTTP/1.1 解析（本机自用足够），
 //! 上游请求用现有 async reqwest + `block_on`。监督线程每 150ms 轮询一次设置，
 //! 关闭开关或改端口即自动解绑/重绑，无需重启应用。
@@ -45,8 +49,16 @@ pub const CONV_HEADER: &str = "X-Conversation-Id";
 const SNAPSHOT_TTL: Duration = Duration::from_secs(600);
 /// 同一会话多久没新请求就释放粘滞（换回按积分重新选）
 const STICKY_TTL: Duration = Duration::from_secs(30 * 60);
-/// accept 空轮询间隔（非阻塞监听）
-const ACCEPT_POLL: Duration = Duration::from_millis(150);
+/// accept 空轮询间隔（非阻塞监听）：它直接等于「请求到达 → 被 accept」的额外延迟
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
+/// 配置（接管开关 / 端口）轮询间隔。比 accept 轮询慢得多：每轮 accept 都去读一次
+/// settings.json 纯属磁盘浪费，而开关变更晚 0.5s 生效完全无感
+const CONFIG_POLL: Duration = Duration::from_millis(500);
+/// 客户端请求头读取时限（读空闲）：连上了却迟迟不发完整请求就放弃。
+/// 注意它只在**阻塞** socket 上生效（`SO_RCVTIMEO` 对非阻塞 socket 无效）——见 `configure_conn`
+const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// 下游写超时：SSE 长对话可能持续数分钟，写超时要给得足够宽
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(600);
 /// 上游连接超时（建连阶段）
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 上游单次读空闲超时：SSE 长对话会持续数分钟，**不能用总超时**——
@@ -188,12 +200,18 @@ pub fn spawn(app: tauri::AppHandle) {
                         continue;
                     }
                     installed_port = Some(port);
+                    // 监听必须非阻塞，才能在 accept 之余顺带轮询配置；
+                    // 但 accept 出来的连接会被 Windows 传染非阻塞，必须逐连接复位——见 configure_conn
                     let _ = listener.set_nonblocking(true);
                     let mut last_beat = Instant::now();
+                    let mut last_cfg = Instant::now();
                     loop {
-                        let current = accounts::load_settings(&dir);
-                        if !current.proxy_enabled || current.proxy_port != port {
-                            break;
+                        if last_cfg.elapsed() >= CONFIG_POLL {
+                            let current = accounts::load_settings(&dir);
+                            if !current.proxy_enabled || current.proxy_port != port {
+                                break;
+                            }
+                            last_cfg = Instant::now();
                         }
                         if last_beat.elapsed() >= stealth::HEARTBEAT_INTERVAL {
                             stealth::heartbeat(&dir, port);
@@ -312,48 +330,125 @@ fn hop_by_hop(name: &str) -> bool {
 // 连接处理
 // ---------------------------------------------------------------------------
 
-fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
-    // SSE 长对话可能持续数分钟，写超时要给得足够宽
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
+/// 把 accept 出来的连接复位成「阻塞 + 超时」模式。
+///
+/// # 为什么必须显式复位（不是洁癖，是线上事故）
+///
+/// 监听 socket 为了能在 accept 之余轮询配置开关，必须是**非阻塞**的；而
+/// **Windows 上 `accept()` 返回的 socket 会继承监听 socket 的非阻塞状态**
+/// （Linux 不继承，所以这个坑在 Linux 上永远测不出来）。于是每个连接天生非阻塞：
+///
+/// - 只要第一次 `read()` 时请求字节还没到齐，就立刻返回 `WouldBlock`（raw os error 10035），
+///   被读循环当成「请求非法」→ 回 400 bad request。触发完全取决于客户端**先连后发**的时序：
+///   连上就发 = 正常；隔 200ms 再发 = 稳定 400。Node/undici 把请求头与请求体分两次 write、
+///   长 body 分多个 TCP 段到达，都正好落在这个窗口里。
+/// - 顺带 `SO_RCVTIMEO` 对非阻塞 socket 无效，`set_read_timeout` 形同虚设 ——
+///   slow-header 熔断实际并不存在。
+///
+/// 复位成阻塞后，`read()` 会老实等到数据到达或读超时，两个问题一起消失。
+fn configure_conn(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(HEAD_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))
+}
 
+/// 读请求的三种结局。
+///
+/// 必须分开：「收到 0 字节」「请求语法错」「连接一直没发数据」是完全不同的病，
+/// 混成一个 `None` 正是这次 400 事故查不出原因的直接原因。
+enum HeadRead {
+    /// 完整拿到一个请求（连带原始缓冲，供后续切出 body）
+    Ready(Request, Vec<u8>),
+    /// 请求读完之前对端就断开 / 读失败
+    Broken(Vec<u8>),
+    /// 读空闲超时；或 socket 仍是非阻塞（一读就 `WouldBlock`）
+    Stalled(Vec<u8>, std::io::ErrorKind),
+}
+
+/// 读请求头 + 正文，返回已收到的字节供调用方落盘诊断。
+fn read_head(stream: &mut TcpStream) -> HeadRead {
+    let mut buf = Vec::with_capacity(8 * 1024);
+    let mut tmp = [0u8; 8192];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => return HeadRead::Broken(buf), // 对端关闭
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(req) = parse_request(&buf) {
+                    if buf.len() >= req.head_end() + req.body_len {
+                        return HeadRead::Ready(req, buf);
+                    }
+                }
+                if buf.len() > MAX_HEAD + MAX_BODY {
+                    return HeadRead::Broken(buf);
+                }
+            }
+            // 阻塞模式下的读超时：Windows 报 `TimedOut`，Linux 报 `WouldBlock`（EAGAIN）。
+            // 两者语义相同（这个读窗口内没有新数据），合并处理，免得平台差异再引出误判。
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return HeadRead::Stalled(buf, e.kind())
+            }
+            Err(_) => return HeadRead::Broken(buf),
+        }
+    }
+}
+
+/// 诊断用：把已收到的字节截成可读前缀（最多 512 字节）
+fn head_prefix(buf: &[u8]) -> String {
+    String::from_utf8_lossy(&buf[..buf.len().min(512)]).to_string()
+}
+
+fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
     // 数据目录：选账号 / 写接管日志都要用；取不到直接 500，不再读请求
     let Ok(dir) = commands::try_data_dir(&app) else {
         respond(&mut stream, 500, "text/plain", b"internal error", &[]);
         return;
     };
 
-    // 1. 读完请求头（+ body）
-    let mut buf = Vec::with_capacity(8 * 1024);
-    let mut tmp = [0u8; 8192];
-    let req = loop {
-        match stream.read(&mut tmp) {
-            Ok(0) => break None, // 对端关闭
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                if let Some(req) = parse_request(&buf) {
-                    if buf.len() >= req.head_end() + req.body_len {
-                        break Some(req);
-                    }
-                }
-                if buf.len() > MAX_HEAD + MAX_BODY {
-                    break None;
-                }
-            }
-            Err(_) => break None,
-        }
-    };
-    let Some(req) = req else {
-        // 诊断用：400 出口原本静默，这里把 offending 请求的前 512 字节落盘，
-        // 便于复现「400 bad request」是请求解析失败，还是上游（腾讯）的 400 被透传。
-        let head = String::from_utf8_lossy(&buf[..buf.len().min(512)]);
-        let _ = stealth::journal_append(
-            &dir,
-            "proxy_bad_request",
-            &format!("请求解析失败，回 400；前 512 字节：\n{head}"),
-        );
-        respond(&mut stream, 400, "text/plain", b"bad request", &[]);
+    // 0. 先复位成阻塞再读。漏掉这一步的代价见 `configure_conn` 的文档。
+    if let Err(e) = configure_conn(&stream) {
+        let _ = stealth::journal_append(&dir, "proxy_conn_setup_failed", &format!("{e}"));
         return;
+    }
+
+    // 1. 读完请求头（+ body）
+    let (req, buf) = match read_head(&mut stream) {
+        HeadRead::Ready(req, buf) => (req, buf),
+        HeadRead::Broken(buf) => {
+            // 读到一半断开。线上最常见的是 **0 字节**：客户端连上但还没发出请求就断开——
+            // 这绝不等于「请求非法」，所以把字节数写进日志，让这种事一眼可辨。
+            let _ = stealth::journal_append(
+                &dir,
+                "proxy_bad_request",
+                &format!(
+                    "请求未读完或不合法，回 400（已收 {} 字节）：\n{}",
+                    buf.len(),
+                    head_prefix(&buf)
+                ),
+            );
+            respond(&mut stream, 400, "text/plain", b"bad request", &[]);
+            return;
+        }
+        HeadRead::Stalled(buf, kind) => {
+            // 连上了但一直没把请求发完。与 400 严格分开：400 = 请求语法错，408 = 没等到请求。
+            // 若这里出现 `WouldBlock` 而字节数为 0，说明连接没被复位成阻塞——就是本文件最上面那个坑。
+            let _ = stealth::journal_append(
+                &dir,
+                "proxy_head_stalled",
+                &format!(
+                    "读请求卡住（{kind:?}），回 408（已收 {} 字节）：\n{}",
+                    buf.len(),
+                    head_prefix(&buf)
+                ),
+            );
+            respond(&mut stream, 408, "text/plain", b"request timeout", &[]);
+            return;
+        }
     };
 
     // 2. 选账号：同一会话粘住同一个账号，新会话才按积分重新选
@@ -757,6 +852,7 @@ fn write_head(
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        408 => "Request Timeout",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         500 => "Internal Server Error",
@@ -1048,6 +1144,7 @@ fn respond(
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        408 => "Request Timeout",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         500 => "Internal Server Error",
@@ -1268,6 +1365,57 @@ mod tests {
             sticky_hit(conv).is_none(),
             "超过 TTL 的粘滞必须释放，好让新会话重新按积分选号"
         );
+    }
+
+    /// 回归：线上 400 事故的根因 —— 监听 socket 非阻塞时，**Windows 会把非阻塞状态
+    /// 传染给 accept 出来的连接**（Linux 不会）。不复位的话，客户端「先连上、稍后再发」
+    /// 就会被读循环判成非法请求（实测：连上就发 = 正常，隔 200/300ms 再发 = 稳定 400）。
+    ///
+    /// 这里用真实 socket 复现该时序：accept 后一个字都没收到，等 300ms 才发完整请求，
+    /// 断言仍能正确解析。缺了 `configure_conn` 的复位，本用例在 Windows 上必失败。
+    #[test]
+    fn late_arriving_request_is_read_after_conn_setup() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // 与代理的 accept 循环保持一致：监听必须非阻塞才能顺带轮询配置
+        listener.set_nonblocking(true).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        configure_conn(&s).expect("复位阻塞模式失败");
+                        return read_head(&mut s);
+                    }
+                    Err(e) => {
+                        assert!(Instant::now() < deadline, "等 accept 超时：{e}");
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            }
+        });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        // 关键：连上之后先不发，把「数据晚于 accept 到达」这个时序做出来
+        std::thread::sleep(Duration::from_millis(300));
+        let raw =
+            b"POST /v2/billing/meter/daily-checkin HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}";
+        client.write_all(raw).unwrap();
+        client.flush().unwrap();
+
+        match server.join().unwrap() {
+            HeadRead::Ready(req, buf) => {
+                assert_eq!(req.method, "POST");
+                assert_eq!(req.target, "/v2/billing/meter/daily-checkin");
+                assert_eq!(buf.len(), raw.len(), "整个请求都该收到");
+            }
+            HeadRead::Broken(buf) => panic!("请求被误判为断开（已收 {} 字节）", buf.len()),
+            HeadRead::Stalled(buf, kind) => panic!(
+                "请求被误判为卡住（{kind:?}，已收 {} 字节）——连接没复位成阻塞？",
+                buf.len()
+            ),
+        }
     }
 
     /// 流式最容易写错的就是分块长度帧与终止帧，这里用一对真实 socket 端到端校验字节。
