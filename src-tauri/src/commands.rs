@@ -469,25 +469,31 @@ pub async fn checkin_all(app: AppHandle) -> Result<Vec<Account>, String> {
     Ok(results)
 }
 
-/// 一键刷新积分：**不打签到接口**，只查每个账号的最新剩余积分并回填到列表。
+/// 一键刷新全部账号的三类数据，并持久化到 accounts.json：
 ///
-/// 与签到解耦——已签到的账号再打签到接口只会拿到 400「已签到」，
-/// 想看最新余额没必要绕这一圈。逐账号查询、失败的不改原值（界面保留旧数）。
+/// 1. **积分快照**：剩余积分 + 最早过期时间（取自 `get-user-resource`，驱动智能接管路由）；
+/// 2. **积分余量**：用快照里的剩余积分回填 `last.balance`（账号列表「剩余积分」列展示）；
+/// 3. **签到状态**：只读查询「今日是否已签到」（不打签到接口、零副作用），写入 `checked_today`。
+///
+/// 不打签到接口——已签到的账号再打只会拿到 400「已签到」，看最新状态没必要绕这一圈。
+/// 逐账号查询、单个失败不改原值（界面保留旧数），最后整体保存一次。
 #[tauri::command]
-pub async fn refresh_all_credits(app: AppHandle) -> Result<Vec<Account>, String> {
+pub async fn refresh_all(app: AppHandle) -> Result<Vec<Account>, String> {
     let dir = data_dir(&app);
     let mut accounts = accounts::load_accounts(&dir);
     if accounts.is_empty() {
         return Ok(Vec::new());
     }
+    let settings = accounts::load_settings(&dir);
     let client = reqwest::Client::new();
     for i in 0..accounts.len() {
         // 凭证临期的先续签，避免拿着过期 token 把「没积分」误判成「查不到」
         let _ = ensure_fresh_token(&mut accounts[i]).await;
         let host = account_host(&accounts[i]);
+        // 1) 积分快照：剩余积分 + 最早过期时间（持久化，供路由与展示）
         let snap = checkin::fetch_credit_snapshot(&client, &host, &accounts[i].token).await;
-        // 新账号还没有签到记录（last 为 None）：刷新积分也要能写进去，
-        // 否则永远停在「余额不展示」。先给一个空记录再回填余额。
+        accounts[i].credit_snapshot = Some(snap);
+        // 2) 积分余量（UI「剩余积分」列）：用快照里的 credits 回填
         if let Some(b) = snap.credits {
             let rec = accounts[i].last.get_or_insert_with(|| accounts::CheckinRecord {
                 success: false,
@@ -503,6 +509,9 @@ pub async fn refresh_all_credits(app: AppHandle) -> Result<Vec<Account>, String>
             });
             rec.balance = Some(b);
         }
+        // 3) 签到状态：只读查询今日是否已签（持久化 checked_today）
+        let checked = checkin::query_checked_today(&accounts[i], &settings.default_base_url).await;
+        accounts[i].checked_today = checked;
     }
     let cloned = accounts.clone();
     accounts::save_accounts(&dir, &accounts).map_err(|e| e.to_string())?;

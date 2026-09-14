@@ -10,7 +10,7 @@ import {
   removeAccount,
   checkinOne,
   checkinAll,
-  refreshCredits,
+  refreshAll,
   getSettings,
   saveSettings as saveSettingsApi,
   appVersion,
@@ -227,17 +227,19 @@ export default function App() {
     }
   }, [showToast]);
 
-  // 一键刷新：只查积分、不触发签到（已签账号再打签到接口只会拿到 400），
-  // 后端返回的就是最新账号列表，「刷新积分」与「刷新数据」一次完成。
+  // 一键刷新：重拉并持久化积分快照（含最早过期时间）+ 真实签到状态 + 积分余量，
+  // 不触发签到（已签账号再打签到接口只会拿到 400）；后端返回最新账号列表一次到位。
   const runRefresh = useCallback(async () => {
     setBusyRefresh(true);
     try {
-      const updated = await refreshCredits();
+      // 一键刷新：积分快照（含最早过期时间）+ 真实签到状态 + 积分余量，全部重拉并持久化
+      const updated = await refreshAll();
       setAccounts(updated);
-      const got = updated.filter((a) => a.last?.balance != null).length;
+      const got = updated.filter((a) => a.credit_snapshot?.credits != null).length;
+      const st = updated.filter((a) => a.checked_today === true).length;
       showToast({
         kind: "ok",
-        text: `已刷新 ${updated.length} 个账号（${got} 个取到积分）`,
+        text: `已刷新 ${updated.length} 个账号（${got} 个取到积分，当前 ${st} 个今日已签）`,
       });
     } catch (e) {
       showToast({ kind: "err", text: "刷新失败：" + String(e) });
@@ -270,7 +272,11 @@ export default function App() {
   const importItems = useCallback(
     async (items: ImportItem[]): Promise<ImportReport> => {
       const report = await importAccounts(items);
-      if (report.added > 0 || report.updated > 0) await load();
+      if (report.added > 0 || report.updated > 0) {
+        await load();
+        // 导入新账号后补查真实状态（只读查询，持久化），列表直接反映服务端真相
+        void refreshAll();
+      }
       return report;
     },
     [load]
@@ -454,7 +460,7 @@ export default function App() {
                 <button
                   className="btn ghost"
                   disabled={busyRefresh || accounts.length === 0}
-                  title="查询全部账号的最新剩余积分，不触发签到"
+                  title="重拉全部账号的积分快照 / 签到状态 / 积分余量并持久化"
                   onClick={runRefresh}
                 >
                   {busyRefresh ? (
@@ -489,7 +495,7 @@ export default function App() {
 
         <main className={"content" + (page === "takeover" ? " content-fill" : "")}>
           {page === "accounts" && (
-            <AccountsPage
+              <AccountsPage
               accounts={accounts}
               loading={loading}
               busyIds={busyIds}

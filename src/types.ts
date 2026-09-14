@@ -23,6 +23,10 @@ export interface Account {
   base_url: string | null;
   created_at: string;
   last: CheckinRecord | null;
+  /** 积分快照（持久化）：剩余积分 + 最早过期时间 + 拉取时刻；路由与展示共用 */
+  credit_snapshot: CreditSnapshot | null;
+  /** 服务端「今日是否已签到」的真实状态（持久化）；null = 未查询/失败 */
+  checked_today: boolean | null;
 }
 
 export interface Settings {
@@ -113,6 +117,16 @@ export interface OAuthPoll {
   /** access token 过期时间（毫秒时间戳） */
   expires_at: number | null;
   error: string | null;
+}
+
+/** 积分快照（持久化到 accounts.json）：路由与展示共用的真实积分画像 */
+export interface CreditSnapshot {
+  /** 剩余积分（get-user-resource 汇总，取不到为 null） */
+  credits: number | null;
+  /** 还有余量的资源包里最早的重置/过期时间（毫秒时间戳）；null = 未知 */
+  earliest_expiry_ms: number | null;
+  /** 本次拉取时刻（本地时间串），用于判断快照是否过期 */
+  fetched_at: string | null;
 }
 
 export interface CheckinLog {

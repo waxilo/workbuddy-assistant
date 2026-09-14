@@ -27,10 +27,11 @@
 //! 上游请求用现有 async reqwest + `block_on`。监督线程每 150ms 轮询一次设置，
 //! 关闭开关或改端口即自动解绑/重绑，无需重启应用。
 
-use crate::accounts;
+use crate::accounts::{self, CreditSnapshot};
 use crate::checkin::fetch_credit_snapshot;
 use crate::commands;
 use crate::stealth;
+use chrono;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -77,18 +78,6 @@ struct CreditInfo {
     expiry_ms: Option<i64>,
     /// 剩余积分；未知为 None
     credits: Option<f64>,
-}
-
-/// 单个账号的积分快照缓存
-fn cache() -> &'static Mutex<HashMap<String, (Instant, CreditInfo)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, CreditInfo)>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// 上次真正拉取积分快照的时刻（决定新会话要不要重新拉）
-fn last_snapshot() -> &'static Mutex<Option<Instant>> {
-    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    LAST.get_or_init(|| Mutex::new(None))
 }
 
 /// 会话粘滞：`x-conversation-id` → (最后命中时刻, 账号 id)
@@ -813,37 +802,18 @@ fn sticky_put(conv: &str, account_id: String) -> bool {
     false
 }
 
-/// 快照是否过期（决定新会话要不要重新打资源接口）
-fn snapshot_is_stale() -> bool {
-    last_snapshot()
-        .lock()
+/// 持久化快照是否过期（决定新会话要不要重新打资源接口）。
+fn snapshot_stale(snap: Option<&CreditSnapshot>) -> bool {
+    let Some(snap) = snap else { return true };
+    let Some(at) = &snap.fetched_at else { return true };
+    match chrono::NaiveDateTime::parse_from_str(at, "%Y-%m-%d %H:%M:%S")
         .ok()
-        .and_then(|l| *l)
-        .map(|t| t.elapsed() >= SNAPSHOT_TTL)
-        .unwrap_or(true)
-}
-
-fn cached_infos(ids: &[String]) -> Vec<CreditInfo> {
-    let map = cache().lock().ok();
-    ids.iter()
-        .map(|id| {
-            map.as_ref()
-                .and_then(|m| m.get(id))
-                .map(|(_, i)| *i)
-                .unwrap_or_default()
-        })
-        .collect()
-}
-
-fn store_infos(ids: &[String], infos: &[CreditInfo]) {
-    if let Ok(mut m) = cache().lock() {
-        let now = Instant::now();
-        for (i, id) in ids.iter().enumerate() {
-            m.insert(id.clone(), (now, infos[i]));
+        .and_then(|t| t.and_local_timezone(chrono::Local).single())
+    {
+        Some(t) => {
+            chrono::Local::now().timestamp() - t.timestamp() >= SNAPSHOT_TTL.as_secs() as i64
         }
-    }
-    if let Ok(mut l) = last_snapshot().lock() {
-        *l = Some(Instant::now());
+        None => true,
     }
 }
 
@@ -911,18 +881,36 @@ async fn choose_account(
     }
 
     // 2) 新会话：快照过期就重新拉，然后按最旧积分挑
+    // 2) 新会话：快照缺失/过期就从接口重拉并落盘，否则直接用持久化的积分快照
     let ids: Vec<String> = usable.iter().map(|a| a.id.clone()).collect();
-    let mut infos = cached_infos(&ids);
-    if snapshot_is_stale() {
-        for (i, acct) in usable.iter().enumerate() {
+    let mut infos: Vec<CreditInfo> = Vec::with_capacity(usable.len());
+    let mut need_persist = false;
+    for acct in &usable {
+        let mut info = acct
+            .credit_snapshot
+            .as_ref()
+            .map(|s| CreditInfo {
+                expiry_ms: s.earliest_expiry_ms,
+                credits: s.credits,
+            })
+            .unwrap_or_default();
+        if snapshot_stale(acct.credit_snapshot.as_ref()) {
             let host = commands::account_host(acct);
             let snap = fetch_credit_snapshot(&CLIENT, &host, &acct.token).await;
-            infos[i] = CreditInfo {
+            info = CreditInfo {
                 expiry_ms: snap.earliest_expiry_ms,
                 credits: snap.credits,
             };
+            // 回写持久化快照（含 fetched_at），下次新会话直接读、不必再打接口
+            if let Some(a) = all.iter_mut().find(|a| a.id.as_str() == acct.id.as_str()) {
+                a.credit_snapshot = Some(snap);
+            }
+            need_persist = true;
         }
-        store_infos(&ids, &infos);
+        infos.push(info);
+    }
+    if need_persist {
+        let _ = accounts::save_accounts(dir, &all);
     }
 
     let idx = pick_index(&ids, &infos)?;

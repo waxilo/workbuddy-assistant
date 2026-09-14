@@ -4,6 +4,7 @@ import {
   maskPhone,
   relativeTime,
   signState,
+  expiryInfo,
   type SignState,
 } from "../common";
 import { IconFile, IconTrash, IconUser, IconRefresh } from "../components/Icons";
@@ -90,6 +91,7 @@ export function AccountsPage({
             <tr>
               <th>账号</th>
               <th>剩余积分</th>
+              <th>积分到期</th>
               <th>最近签到</th>
               <th>状态</th>
               <th className="col-actions">操作</th>
@@ -100,6 +102,7 @@ export function AccountsPage({
               const busy = busyIds.has(a.id);
               const st = signState(a, busy);
               const low = a.last?.balance != null && a.last.balance < 100;
+              const e = expiryInfo(a.credit_snapshot?.earliest_expiry_ms);
               const initial = /^\d/.test(a.name) ? null : a.name.slice(0, 1);
               return (
                 <tr key={a.id} className="account-row">
@@ -119,6 +122,15 @@ export function AccountsPage({
                       </span>
                     ) : (
                       <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td className="ac-cell-expiry">
+                    {e.text === "—" ? (
+                      <span className="muted">—</span>
+                    ) : (
+                      <span className={"ac-expiry" + (e.expired ? " expired" : "")}>
+                        {e.text}
+                      </span>
                     )}
                   </td>
                   <td className="ac-cell-last">

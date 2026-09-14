@@ -80,15 +80,30 @@ export function isToday(at?: string | null): boolean {
 
 export type SignState = "signing" | "done" | "pending" | "fail" | "inactive";
 
-/** 账号签到状态：用于状态列徽标 + 顶部统计卡片（busy 优先于一切） */
+/**
+ * 账号签到状态：用于状态列徽标 + 顶部统计卡片（busy 优先于一切）。
+ *
+ * 判定优先级（解决「状态不真实 / 本地报错 / 跨天不复位」三类问题）：
+ * 1. 今天真正点过签到（`last.at` 是今天）→ 以那次真实结果为准（最权威），
+ *    因为官方 `checkin-status` 的 `today_checked_in` 偶发不可靠，必须让真实尝试压过它。
+ * 2. 否则以持久化的服务端「今日是否已签到」真实状态（`a.checked_today`）为准
+ *    （由刷新命令写入 accounts.json，绝不依赖本地试签的陈旧缓存）。
+ * 3. 都没有今天的真实依据 → 「待签到」。`checked_today===false` 或查询失败(null) 都算未知，
+ *    绝不再把昨天的 `already` 当「已签」、也不再拿陈旧本地报错当「失败」。
+ */
 export function signState(a: Account, busy: boolean): SignState {
   if (busy) return "signing";
   const r = a.last;
-  if (!r) return "pending";
-  if (r.already) return "done";
-  if (r.success) return isToday(r.at) ? "done" : "pending";
-  if (r.inactive) return "inactive";
-  return "fail";
+  // 今天有过一次真实签到尝试：以它的结果为准
+  if (r && isToday(r.at)) {
+    if (r.already || r.success) return "done";
+    if (r.inactive) return "inactive";
+    return "fail"; // 今天真的签失败了（网络 / 鉴权 / 非活动未开以外的真错误）
+  }
+  // 没有今天的真实尝试：以持久化的服务端真实返回为准
+  if (a.checked_today === true) return "done";
+  // false / 查询失败(null) / 未查询 → 今天状态未知，显示「待签到」
+  return "pending";
 }
 
 /** 一批签到结果的互斥计数（成功 / 已签 / 失败），避免「已签」被重复算成「成功」 */
@@ -126,4 +141,18 @@ export function LogBadge({ log }: { log: CheckinLog }) {
   if (log.success) return <span className="badge badge-ok">成功</span>;
   if (log.inactive) return <span className="badge badge-idle">活动未开</span>;
   return <span className="badge badge-err">失败</span>;
+}
+
+/// 积分过期时间展示：毫秒时间戳 → 「MM-DD HH:mm」；已过期的标 expired。
+/// 返回 { text, expired }，UI 用 expired 加样式。null/非法返回「—」。
+export function expiryInfo(
+  ms?: number | null
+): { text: string; expired: boolean } {
+  if (ms == null) return { text: "—", expired: false };
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return { text: "—", expired: false };
+  const expired = ms < Date.now();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const text = `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return { text, expired };
 }

@@ -323,7 +323,7 @@ WorkBuddy 登录成功后会自己把账号与凭证写到本机：
 | `get_autostart` / `set_autostart` | 读取 / 设置开机自启动（直接操作系统登录项，失败会返回原因） |
 | `get_checkin_logs` | 查询签到日志（倒序、可按账号 id 筛选、最多 300 条） |
 | `clear_checkin_logs` | 清空签到日志（传 `accountId` 则只清该账号） |
-| `refresh_all_credits` | 一键刷新：只查各账号最新剩余积分并落盘，不触发签到 |
+| `refresh_all` | 一键刷新：重拉并持久化全部账号的积分快照 / 签到状态 / 积分余量 |
 | `stealth_status` / `stealth_stop` | 读取接管状态（端点是否装上 / 心跳）与立即停止接管（含安全重启） |
 | `proxy_routes` | 最近代理路由记录（账号 / 路径 / 是否流式） |
 | `net_diagnose` / `net_restore` | 网络急救：只读诊断 / 一键恢复（自动备份被改文件） |

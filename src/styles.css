@@ -498,6 +498,15 @@ body {
 .ac-balance.low {
   color: var(--warn);
 }
+/* 积分到期：最早过期包的剩余时间，过期用红色警示 */
+.ac-cell-expiry {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.ac-expiry.expired {
+  color: var(--err);
+  font-weight: 600;
+}
 /* 最近签到：相对时间为主，完整时间作辅助并带 Tooltip */
 .ac-last {
   display: flex;

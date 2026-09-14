@@ -20,6 +20,22 @@ pub struct CheckinRecord {
     pub code: Option<i64>,
 }
 
+/// 积分快照（持久化到 accounts.json）：路由与展示共用的「真实积分画像」。
+///
+/// - `credits`：剩余积分（get-user-resource 汇总，取不到为 None）
+/// - `earliest_expiry_ms`：还有余量的资源包里最早的重置/过期时间（毫秒，
+///   驱动「按积分过期时间优先路由」）；无余量/未知为 None
+/// - `fetched_at`：本次拉取时刻（本地时间串 `%Y-%m-%d %H:%M:%S`），用于判断快照是否过期
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CreditSnapshot {
+    #[serde(default)]
+    pub credits: Option<f64>,
+    #[serde(default)]
+    pub earliest_expiry_ms: Option<i64>,
+    #[serde(default)]
+    pub fetched_at: Option<String>,
+}
+
 /// 一个签到账号
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Account {
@@ -41,6 +57,15 @@ pub struct Account {
     pub created_at: String,
     #[serde(default)]
     pub last: Option<CheckinRecord>,
+    /// 积分快照（持久化）：剩余积分 + 最早过期时间 + 拉取时刻。
+    /// 智能接管路由与账号列表展示都读它；刷新命令会重拉并落盘。
+    #[serde(default)]
+    pub credit_snapshot: Option<CreditSnapshot>,
+    /// 服务端「今日是否已签到」的真实状态（只读查询，持久化）。
+    /// None = 尚未查询/查询失败（前端按「未知 / 待签到」处理，
+    /// 绝不再把昨天的本地缓存或一次本地报错当成确定状态）。
+    #[serde(default)]
+    pub checked_today: Option<bool>,
 }
 
 /// 全局设置

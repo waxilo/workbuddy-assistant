@@ -43,8 +43,8 @@ export const checkinOne = (id: string) =>
 
 export const checkinAll = () => invoke<Account[]>("checkin_all");
 
-/** 一键刷新：不打签到接口，只查询全部账号的最新剩余积分并回填列表 */
-export const refreshCredits = () => invoke<Account[]>("refresh_all_credits");
+/** 一键刷新：不打签到接口，重拉并持久化全部账号的积分快照 / 签到状态 / 积分余量 */
+export const refreshAll = () => invoke<Account[]>("refresh_all");
 
 /** 首选通道：读本机 WorkBuddy 登录文件（auth/*.info），含昵称与手机号 */
 export const discoverLocalAccounts = () =>

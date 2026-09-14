@@ -1,4 +1,4 @@
-use crate::accounts::{Account, CheckinRecord};
+use crate::accounts::{Account, CheckinRecord, CreditSnapshot};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use regex::Regex;
@@ -288,13 +288,6 @@ fn earliest_cycle_end(body: &Value) -> Option<i64> {
     earliest
 }
 
-/// 一个账号的积分快照：剩余积分 + 最早的积分过期时间（反代路由用）
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CreditSnapshot {
-    pub credits: Option<f64>,
-    pub earliest_expiry_ms: Option<i64>,
-}
-
 /// 兜底：从 `checkin-status` 的 data 里取累计积分（不同后端键名不一）
 fn extract_total_credits(data: &Value) -> Option<f64> {
     for key in ["total_credits", "total_credit", "credit_balance", "balance"] {
@@ -362,6 +355,7 @@ pub async fn fetch_credit_snapshot(
             }
         }
     }
+    snap.fetched_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
     snap
 }
 
@@ -414,6 +408,102 @@ pub async fn do_checkin(account: &Account, default_base: &str) -> CheckinRecord 
         host: None,
         at: now,
     }
+}
+
+/// 只读查询「今日是否已签到」：主用 `checkin-activity-status`(v2)，退 `checkin-status`(v1)。
+///
+/// 零副作用——只发查询、绝不打签到接口，用于列表展示的真实状态。
+///
+/// 注意：官方 `today_checked_in` 偶发不可靠（签到成功后仍可能为 `false`，clawhub 实测），
+/// 所以这只是「软」状态；真正权威的「今日已签」来自 `daily-checkin` 返回 `code=10001`
+/// （见 `do_checkin` / `classify`）。前端会把「今天真实点过签到」的结果优先于此。
+pub async fn query_checked_today(account: &Account, default_base: &str) -> Option<bool> {
+    let hosts = candidate_hosts(&account.token, account.base_url.as_deref(), default_base);
+    let client = reqwest::Client::new();
+    // 候选路径按「最可能命中」排序；任一能解析出 today_checked_in 即返回，不必穷尽。
+    let paths = [
+        "/v2/billing/meter/checkin-activity-status",
+        "/billing/meter/checkin-status",
+        "/v2/billing/meter/checkin-status",
+    ];
+    for host in &hosts {
+        for path in paths {
+            let url = format!("{}{}", host, path);
+            let Ok(resp) = client
+                .post(&url)
+                .bearer_auth(&account.token)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .body("{}")
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            else {
+                continue;
+            };
+            let Ok(body) = resp.json::<Value>().await else {
+                continue;
+            };
+            if let Some(b) = parse_checked_today(&body) {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+/// 从 `checkin-status` / `checkin-activity-status` 响应里解析「今日是否已签到」。
+///
+/// 优先读显式布尔字段（兼容 `today_checked_in` / `today_checked` / `is_checked_today` /
+/// `checked_today` / `signed_today` / `checked` / `has_checked` 等多种命名，也接受字符串
+/// 形态的 `"true"` / `"false"`）；
+/// 退路：响应里若有「最近签到日期」且等于今天 → 已签，含日期但不是今天 → 未签。
+fn parse_checked_today(body: &Value) -> Option<bool> {
+    let d = body.get("data")?;
+    const BOOL_KEYS: &[&str] = &[
+        "today_checked_in",
+        "today_checked",
+        "is_checked_today",
+        "checked_today",
+        "signed_today",
+        "today_checkin",
+        "checked",
+        "has_checked",
+    ];
+    for k in BOOL_KEYS {
+        if let Some(v) = d.get(*k) {
+            if let Some(b) = v.as_bool() {
+                return Some(b);
+            }
+            if let Some(s) = v.as_str() {
+                if let Ok(b) = s.trim().parse::<bool>() {
+                    return Some(b);
+                }
+            }
+        }
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    const DATE_KEYS: &[&str] = &[
+        "last_checkin_date",
+        "last_checkin_time",
+        "last_time",
+        "last_checkin_at",
+        "checkin_date",
+        "last_checkin",
+    ];
+    for k in DATE_KEYS {
+        if let Some(s) = d.get(*k).and_then(Value::as_str) {
+            let s = s.trim();
+            if s.starts_with(today.as_str()) {
+                return Some(true);
+            }
+            // 含 10 位日期且不是今天 → 今天没签（明确 false，别留 None 让前端误判）
+            if s.len() >= 10 && s[..10].chars().all(|c| c.is_ascii_digit() || c == '-') {
+                return Some(false);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

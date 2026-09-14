@@ -65,7 +65,7 @@ pub fn run() {
             commands::remove_account,
             commands::checkin_one,
             commands::checkin_all,
-            commands::refresh_all_credits,
+            commands::refresh_all,
             commands::discover_local_accounts,
             commands::oauth_start,
             commands::oauth_poll,
