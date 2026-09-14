@@ -37,6 +37,14 @@ export function maskPhone(s: string): string {
   return /^\d{11}$/.test(s) ? s.slice(0, 3) + "****" + s.slice(7) : s;
 }
 
+/** 字节数展示：B / KB / MB（更新下载进度用）。非法输入返回「—」 */
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 /// 账号在日志/筛选中的展示名：名称 + 手机号（手机号缺失时省略）。
 /// 名称本身是手机号时同样脱敏；过滤/匹配请直接用原始字段，不要经过这里。
 export function accountLabel(name: string, phone?: string | null): string {

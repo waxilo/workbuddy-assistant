@@ -1,11 +1,44 @@
-import { check } from "@tauri-apps/plugin-updater";
+import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 
 export interface UpdateProgress {
-  status: "checking" | "available" | "downloading" | "installing" | "updated" | "no-update" | "error";
+  status:
+    | "checking"
+    | "available"
+    | "downloading"
+    | "installing"
+    | "updated"
+    | "no-update"
+    | "error";
   message: string;
+  /** 已下载字节数（仅 downloading 时有意义） */
   downloaded?: number;
+  /** 总字节数；undefined / 0 = 服务端没给 Content-Length，进度不可知 */
   total?: number;
+}
+
+/** 可直接渲染的下载进度；percent 为 null 表示「总量未知」，UI 走不确定态 */
+export interface DownloadProgress {
+  downloaded: number;
+  total: number;
+  percent: number | null;
+}
+
+/**
+ * 把 UpdateProgress 收敛成能直接渲染的进度；非下载中返回 null（不显示进度条）。
+ *
+ * 独立出来是因为「百分比怎么算」属于更新逻辑，不该散在页面里；
+ * 页面只消费 { downloaded, total, percent } 三个数。
+ */
+export function downloadProgress(p: UpdateProgress | null): DownloadProgress | null {
+  if (!p || p.status !== "downloading") return null;
+  const downloaded = p.downloaded ?? 0;
+  const total = p.total ?? 0;
+  return {
+    downloaded,
+    total,
+    percent: total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null,
+  };
 }
 
 /**
@@ -39,20 +72,36 @@ export async function checkAndInstall(
 
   try {
     let downloaded = 0;
-    onProgress({ status: "downloading", message: "正在下载更新…", downloaded: 0 });
-    await update.downloadAndInstall((event) => {
-      if (event.event === "Progress") {
-        downloaded += (event.data as { chunkLength: number }).chunkLength;
-        onProgress({
-          status: "downloading",
-          message: "正在下载更新…",
-          downloaded,
-          total: (event.data as { contentLength?: number }).contentLength,
-        });
-      } else if (event.event === "Finished") {
-        onProgress({ status: "installing", message: "正在安装更新…" });
+    // 总大小只在 Started 事件里给（Progress 事件只有 chunkLength），必须在这里记住它；
+    // 若去 Progress 里取 contentLength，total 恒为 undefined → 百分比恒为 0 → 进度条永远是空条。
+    let total = 0;
+    const emit = () =>
+      onProgress({
+        status: "downloading",
+        message: "正在下载更新…",
+        downloaded,
+        total,
+      });
+    emit();
+
+    // switch 直接收窄 data 类型 —— 不要用 as 断言，
+    // 正是「把 Progress 的数据断言成含 contentLength」才让这个 bug 躲过了 tsc。
+    const onEvent = (event: DownloadEvent) => {
+      switch (event.event) {
+        case "Started":
+          total = event.data.contentLength ?? 0;
+          emit();
+          break;
+        case "Progress":
+          downloaded += event.data.chunkLength;
+          emit();
+          break;
+        case "Finished":
+          onProgress({ status: "installing", message: "正在安装更新…" });
+          break;
       }
-    });
+    };
+    await update.downloadAndInstall(onEvent);
   } catch (e) {
     onProgress({ status: "error", message: "更新失败：" + errMsg(e) });
     return;

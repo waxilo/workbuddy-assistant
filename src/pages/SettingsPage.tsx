@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Settings } from "../types";
 import { setAutostart, getAutostart, testNotify } from "../api";
-import { checkAndInstall, type UpdateProgress } from "../updater";
-import type { Toast } from "../common";
+import { checkAndInstall, downloadProgress, type UpdateProgress } from "../updater";
+import { formatBytes, type Toast } from "../common";
 import {
   IconCalendar,
   IconShield,
@@ -175,10 +175,8 @@ export function SettingsPage({
     }
   };
 
-  const updatePercent =
-    updateStatus?.status === "downloading" && updateStatus.total && updateStatus.total > 0
-      ? Math.min(100, Math.round(((updateStatus.downloaded ?? 0) / updateStatus.total) * 100))
-      : 0;
+  // 下载进度：total 未知时 percent 为 null（UI 走「不确定」态），非下载中为 null
+  const dl = downloadProgress(updateStatus);
 
   return (
     <section className="panel-page set-page">
@@ -438,16 +436,20 @@ export function SettingsPage({
               >
                 {updateStatus.message}
               </div>
-              {updateStatus.status === "downloading" && (
-                <div className="upd-progress-wrap">
-                  <div
-                    className="upd-progress-bar"
-                    style={{ width: `${updatePercent}%` }}
-                  />
-                </div>
-              )}
-              {updateStatus.status === "downloading" && updateStatus.total && updateStatus.total > 0 && (
-                <div className="upd-progress-text">{updatePercent}%</div>
+              {dl && (
+                <>
+                  <div className="upd-progress-wrap">
+                    <div
+                      className={`upd-progress-bar${dl.percent === null ? " indet" : ""}`}
+                      style={dl.percent === null ? undefined : { width: `${dl.percent}%` }}
+                    />
+                  </div>
+                  <div className="upd-progress-text">
+                    {dl.percent === null
+                      ? `已下载 ${formatBytes(dl.downloaded)}`
+                      : `${formatBytes(dl.downloaded)} / ${formatBytes(dl.total)} · ${dl.percent}%`}
+                  </div>
+                </>
               )}
             </div>
           )}
