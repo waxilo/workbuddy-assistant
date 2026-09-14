@@ -13,9 +13,10 @@
 //! 2. **选账号**：谁的「还有余量的资源包」最早过期就用谁——把快过期的积分先消耗掉；
 //!    查不到过期时间的账号排最后，剩余积分为 0 的账号直接跳过（除非全员为 0）。
 //! 3. **限流无感切换**：免费模型（从网关 `/v2/enterprises/personal/models` 动态拉取
-//!    积分倍率，倍率为 0 即免费；1h 缓存，失败兜底 hy3）触发限流（429）时，把该账号
-//!    打入 10 分钟冷却、解绑会话粘滞，换下一个账号重发同一请求（上限 2 次切换）；
-//!    冷却中的账号路由优先跳过。付费模型的 429 原样透传。
+//!    积分倍率，倍率为 0 即免费；1h 缓存，失败兜底 hy3）触发限流（429）时，把
+//!    **「该账号 × 该模型」**冷却到上游给出的重置时刻，换下一个账号重发同一请求
+//!    （上限 2 次切换）；冷却中的「账号 × 模型」在选号时优先跳过。付费模型的 429
+//!    原样透传。冷却的粒度与时间节点见 `RateKey` / `limit_until_ms`。
 //! 4. **续签兜底**：选中的账号若凭证临近过期（<48h）会先自动续签。
 //! 5. **转发**：路径与查询串原样保留，替换 `Authorization` 为选中账号的 token，
 //!    去掉逐跳头（Host / Content-Length 等）后透传其余请求头。
@@ -36,6 +37,7 @@ use crate::checkin::fetch_credit_snapshot;
 use crate::commands;
 use crate::stealth;
 use chrono;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -92,30 +94,254 @@ struct CreditInfo {
     credits: Option<f64>,
 }
 
-/// 会话粘滞：`x-conversation-id` → (最后命中时刻, 账号 id)
-fn sticky() -> &'static Mutex<HashMap<String, (Instant, String)>> {
-    static STICKY: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
+/// 会话粘滞键：**会话 × 模型**。
+///
+/// 带上模型是为了跟限流冷却的粒度对齐（见 `RateKey`）：粘滞的意义是「别在同一次对话
+/// 中途换账号」，而换号可能是被「某个模型的限流」逼出来的——辅助小模型（如 0 积分的
+/// hy3）吃 429 换了号，不该把主模型的后续请求也一起搬走。各模型各自粘，互不牵连。
+/// 模型未知（非对话请求）用空串占位，等价于原来按会话粘。
+fn sticky_key(conv: &str, model: Option<&str>) -> (String, String) {
+    (conv.to_string(), model.unwrap_or_default().to_string())
+}
+
+/// 会话粘滞：(会话, 模型) → (最后命中时刻, 账号 id)
+fn sticky() -> &'static Mutex<HashMap<(String, String), (Instant, String)>> {
+    static STICKY: OnceLock<Mutex<HashMap<(String, String), (Instant, String)>>> = OnceLock::new();
     STICKY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 账号触发限流（429）后的冷却时长：期间路由优先跳过它
-const COOLDOWN_TTL: Duration = Duration::from_secs(10 * 60);
 /// 同一次客户端请求里，最多换几个账号重试（首次 + 2 次切换）
 const FAILOVER_MAX_TRIES: usize = 3;
 
-/// 限流冷却表：账号 id → 进入冷却的时刻
-fn cooldown() -> &'static Mutex<HashMap<String, Instant>> {
-    static COOLDOWN: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+/// 上游 429 没给重置时刻时的兜底冷却时长。
+/// 实测网关总会给（见 `limit_until_ms`），这条只防上游改文案格式。
+const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(10 * 60);
+/// 冷却时长下限：解析出的时刻若已过去（时钟偏差、文案写的是历史时间）也要真冷却一小会儿，
+/// 否则下一个请求立刻撞回同一个 429
+const RATE_LIMIT_MIN: Duration = Duration::from_secs(30);
+/// 冷却时长上限：解析结果再离谱也不能把账号锁死超过一天
+const RATE_LIMIT_MAX: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// 限流冷却的存储键：**账号 × 模型**。
+///
+/// 键必须带模型。实测（2026-09-14）：同一账号 `hy3` 吃 429 的同一时刻，主模型
+/// `deepseek-v4.1-flash` 依然 200，上游文案也明说「您也可以切换其他模型继续使用」——
+/// 限流本来就是按「账号 × 模型」算的。按账号整体冷却会把它本来还能服务的模型一起赶走，
+/// 白白浪费一个额度充足的账号。
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct RateKey {
+    account_id: String,
+    model: String,
+}
+
+/// 时间节点的来源：决定日志怎么写、要不要提示「上游没给」
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LimitSource {
+    /// 响应体文案里的「将在 … 重置」（实测网关走这条）
+    Body,
+    /// `Retry-After` 响应头
+    RetryAfter,
+    /// `X-RateLimit-Reset` 一类响应头
+    ResetHeader,
+    /// 上游没给 → 兜底时长
+    Fallback,
+}
+
+impl LimitSource {
+    /// 这个时刻是不是上游真给的（否则是兜底算的，日志要说明）
+    fn from_upstream(self) -> bool {
+        self != LimitSource::Fallback
+    }
+}
+
+/// 一条冷却记录
+#[derive(Clone, Copy, Debug)]
+struct CooldownEntry {
+    /// 解禁时刻（unix 毫秒）
+    until_ms: i64,
+    /// 该时刻的来源
+    source: LimitSource,
+}
+
+/// 限流冷却表：(账号 × 模型) → 解禁时刻
+fn cooldown() -> &'static Mutex<HashMap<RateKey, CooldownEntry>> {
+    static COOLDOWN: OnceLock<Mutex<HashMap<RateKey, CooldownEntry>>> = OnceLock::new();
     COOLDOWN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 账号是否仍在冷却期内
-fn cooling(id: &str) -> bool {
-    cooldown()
-        .lock()
+/// 当前墙钟毫秒。冷却用**墙钟**而非 `Instant`：上游给的是绝对时刻，
+/// 只有存绝对时刻才能把「几点解禁 / 还剩多久」原样展示出来。
+fn now_ms() -> i64 {
+    chrono::Local::now().timestamp_millis()
+}
+
+/// 「账号 × 模型」是否仍在限流窗口内。顺手清掉已过期的记录，免得长年常驻攒垃圾。
+///
+/// 模型未知（非对话请求）时无从匹配，一律按「未冷却」——限流本来就是按模型算的。
+fn cooling(account_id: &str, model: Option<&str>) -> bool {
+    let Some(model) = model else { return false };
+    let Ok(mut m) = cooldown().lock() else {
+        return false;
+    };
+    let now = now_ms();
+    m.retain(|_, e| e.until_ms > now);
+    m.contains_key(&RateKey {
+        account_id: account_id.to_string(),
+        model: model.to_string(),
+    })
+}
+
+/// 记一条冷却。解禁时刻先夹到 `[now+MIN, now+MAX]`：时钟偏差与离谱文案既不会把
+/// 账号锁死一天以上，也不会让冷却等于没锁。
+fn set_cooldown(
+    account_id: &str,
+    model: &str,
+    until_ms: i64,
+    source: LimitSource,
+) -> CooldownEntry {
+    let now = now_ms();
+    let entry = CooldownEntry {
+        until_ms: until_ms.clamp(
+            now + RATE_LIMIT_MIN.as_millis() as i64,
+            now + RATE_LIMIT_MAX.as_millis() as i64,
+        ),
+        source,
+    };
+    if let Ok(mut m) = cooldown().lock() {
+        m.insert(
+            RateKey {
+                account_id: account_id.to_string(),
+                model: model.to_string(),
+            },
+            entry,
+        );
+    }
+    entry
+}
+
+/// 日志里那半句「冷却 …」：带解禁时刻与来源的可读说明
+fn cooldown_note(entry: CooldownEntry) -> String {
+    let mins = ((entry.until_ms - now_ms()).max(0) as f64 / 60_000.0).ceil() as i64;
+    if entry.source.from_upstream() {
+        format!("至 {}（约 {mins} 分钟）", until_text(entry.until_ms))
+    } else {
+        format!("（上游未给重置时刻，按兜底 {mins} 分钟）")
+    }
+}
+
+/// 解禁时刻的展示串：当天只给 `HH:MM`，跨天才补日期
+fn until_text(until_ms: i64) -> String {
+    let Some(t) = chrono::DateTime::from_timestamp_millis(until_ms) else {
+        return "未知".into();
+    };
+    let local = t.with_timezone(&chrono::Local);
+    if local.date_naive() == chrono::Local::now().date_naive() {
+        local.format("%H:%M").to_string()
+    } else {
+        local.format("%m-%d %H:%M").to_string()
+    }
+}
+
+/// 解析 429 里的「重置时刻」，返回 (unix 毫秒, 来源)。
+///
+/// # 上游实测长什么样（2026-09-14，`Server: APISIX/3.9.1`）
+///
+/// 429 **不带任何 `Retry-After` 头**，时间节点只写在响应体的中文文案里：
+///
+/// ```text
+/// {"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-14 19:35:25 UTC+8 重置，
+///  您也可以切换其他模型继续使用。","requestId":"…"}
+/// ```
+///
+/// 同一分钟内连发两次探测，返回的重置时刻**逐字相同**——是个绝对时刻，不是
+/// 「now + N 秒」的滚动值，所以可以直接当封禁到期时间去比对。解析顺序：
+///
+/// 1. `Retry-After`（秒数或 HTTP-date）
+/// 2. `X-RateLimit-Reset-After` / `X-RateLimit-Reset`（秒差 / unix 秒 / unix 毫秒）
+/// 3. 响应体文案里的 `YYYY-MM-DD HH:MM:SS`（可带 `UTC+8` / `+08:00` 偏移，缺省按本机时区）
+///
+/// 都读不到返回 `None`，由调用方落到兜底时长（日志会写明「上游未给」）。
+fn limit_until_ms(
+    headers: &[(String, String)],
+    body: &[u8],
+    now: i64,
+) -> Option<(i64, LimitSource)> {
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim())
+    };
+    if let Some(ms) = header("retry-after").and_then(|v| parse_retry_after(v, now)) {
+        return Some((ms, LimitSource::RetryAfter));
+    }
+    for name in ["x-ratelimit-reset-after", "x-ratelimit-reset"] {
+        if let Some(ms) = header(name).and_then(|v| parse_reset_header(v, now)) {
+            return Some((ms, LimitSource::ResetHeader));
+        }
+    }
+    parse_reset_text(&String::from_utf8_lossy(body)).map(|ms| (ms, LimitSource::Body))
+}
+
+/// `Retry-After`：RFC 允许「秒数」或「HTTP-date」两种写法
+fn parse_retry_after(v: &str, now: i64) -> Option<i64> {
+    if let Ok(secs) = v.parse::<i64>() {
+        return (secs >= 0).then(|| now + secs * 1000);
+    }
+    chrono::DateTime::parse_from_rfc2822(v)
         .ok()
-        .and_then(|m| m.get(id).map(|t| t.elapsed() < COOLDOWN_TTL))
-        .unwrap_or(false)
+        .map(|d| d.timestamp_millis())
+}
+
+/// `X-RateLimit-Reset` 系：各网关语义不统一（秒差 / unix 秒 / unix 毫秒），
+/// 按数量级判——> 1e12 当毫秒、> 1e9 当 unix 秒、否则当「还剩多少秒」。
+fn parse_reset_header(v: &str, now: i64) -> Option<i64> {
+    let n: f64 = v.trim().parse().ok()?;
+    if !(n > 0.0) {
+        return None;
+    }
+    Some(if n > 1e12 {
+        n as i64
+    } else if n > 1e9 {
+        (n * 1000.0) as i64
+    } else {
+        now + (n * 1000.0) as i64
+    })
+}
+
+/// 文案里的时间戳本体 `YYYY-MM-DD HH:MM:SS`
+static RESET_AT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})").unwrap()
+});
+/// 紧跟在时间戳之后的时区偏移：`UTC+8` / `GMT-05:00` / `+08:00`。
+/// 匹配不上就按本机时区解释（网关文案给的是 `UTC+8`，与国内机器一致）。
+static RESET_TZ_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*(?:UTC|GMT)?\s*([+-])(\d{1,2})(?::?(\d{2}))?").unwrap());
+
+/// 解析响应体文案里的重置时刻
+fn parse_reset_text(text: &str) -> Option<i64> {
+    let caps = RESET_AT_RE.captures(text)?;
+    let num = |i: usize| caps.get(i).and_then(|m| m.as_str().parse::<u32>().ok());
+    let naive = chrono::NaiveDate::from_ymd_opt(num(1)? as i32, num(2)?, num(3)?)?
+        .and_hms_opt(num(4)?, num(5)?, num(6)?)?;
+    // 时间戳后面紧跟的偏移量（`UTC+8`），没写就是本机时区
+    let offset_secs = caps
+        .get(0)
+        .and_then(|m| RESET_TZ_RE.captures(&text[m.end()..]))
+        .and_then(|tz| {
+            let sign = if &tz[1] == "-" { -1 } else { 1 };
+            let h: i64 = tz[2].parse().ok()?;
+            let m: i64 = tz.get(3).map_or(Some(0), |x| x.as_str().parse().ok())?;
+            Some(sign * (h * 3600 + m * 60))
+        });
+    match offset_secs {
+        // 文案自带偏移：先按 UTC 解释，再减掉偏移得到绝对时刻
+        Some(off) => Some(naive.and_utc().timestamp_millis() - off * 1000),
+        None => naive
+            .and_local_timezone(chrono::Local)
+            .single()
+            .map(|d| d.timestamp_millis()),
+    }
 }
 
 /// 候选软过滤（纯函数，便于单测）：优先剔除冷却中的账号；
@@ -468,15 +694,18 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
     let model = if is_chat { body_model(body) } else { None };
     let url = upstream_url(&host, &path);
 
-    // 3. 选账号并透传；免费模型（Hy3）限流（429）发生在流式输出开始前，响应头还没写给
-    //    下游，正好有重试窗口：把限流账号打入冷却、解绑会话粘滞，换下一个账号重发同一
-    //    请求，对 CLI 完全无感。付费模型的 429 与积分余额相关，原样透传不重试。
+    // 3. 选账号并透传；0 积分免费模型限流（429）发生在流式输出开始前，响应头还没写给
+    //    下游，正好有重试窗口：把「该账号 × 该模型」冷却到上游给出的重置时刻，换下一个
+    //    账号重发同一请求，对 CLI 完全无感。付费模型的 429 与积分余额相关，原样透传不重试。
     //    重试次数有上限，用尽后 429 原样透传。
     let mut ban: Vec<String> = Vec::new();
     loop {
-        let Some(account) =
-            tauri::async_runtime::block_on(choose_account(&dir, conv.as_deref(), &ban))
-        else {
+        let Some(account) = tauri::async_runtime::block_on(choose_account(
+            &dir,
+            conv.as_deref(),
+            &ban,
+            model.as_deref(),
+        )) else {
             respond(&mut stream, 503, "text/plain", b"no account available", &[]);
             return;
         };
@@ -521,26 +750,35 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
         };
 
         match upstream {
-            Ok(resp) if is_chat
-                && is_rate_limited_model(model.as_deref(), &free_set, &settings.rate_limit_models)
-                && resp.status() == 429 => {
-                // 限流账号冷却 + 会话解绑：同一会话的下一次请求也会自动绕开它
-                if let Ok(mut m) = cooldown().lock() {
-                    m.insert(account.id.clone(), Instant::now());
-                }
-                if let Some(c) = &conv {
-                    if let Ok(mut s) = sticky().lock() {
-                        s.remove(c);
-                    }
-                }
-                let m = model.as_deref().unwrap_or("未知");
+            Ok(resp)
+                if is_chat
+                    && is_rate_limited_model(
+                        model.as_deref(),
+                        &free_set,
+                        &settings.rate_limit_models,
+                    )
+                    && resp.status() == 429 =>
+            {
+                // 重置时刻只写在响应体的文案里（网关不给 Retry-After），所以必须把体整个
+                // 读下来。代价是这段响应没法再流式透传：没有备用账号那条路径要自己把字节写回下游。
+                let limited = tauri::async_runtime::block_on(read_rate_limited(resp));
+                let (until_ms, source) = limit_until_ms(&limited.headers, &limited.body, now_ms())
+                    .unwrap_or((
+                        now_ms() + RATE_LIMIT_FALLBACK.as_millis() as i64,
+                        LimitSource::Fallback,
+                    ));
+                let model_name = model.as_deref().unwrap_or("未知");
+                // 封禁粒度 = 账号 × 模型：上游就是这么算的，这个账号的**其它模型**照用
+                let note = cooldown_note(set_cooldown(&account.id, model_name, until_ms, source));
+                // 粘滞不必解绑：冷却表已保证该「账号 × 模型」在有效期内不会被选中；
+                // 而粘滞按「会话 × 模型」分开记，这次冷却不会牵连同会话的其它模型。
                 if ban.len() + 1 < FAILOVER_MAX_TRIES {
                     ban.push(account.id.clone());
                     stealth::journal_append(
                         &dir,
                         "failover",
                         &format!(
-                            "账号「{}」的 {m} 请求触发限流（429），已无感切换备用账号继续服务",
+                            "账号「{}」的模型「{model_name}」触发限流（429），该账号 × 该模型冷却{note}，已无感切换备用账号继续服务",
                             account.name
                         ),
                     );
@@ -550,11 +788,11 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
                     &dir,
                     "failover",
                     &format!(
-                        "账号「{}」的 {m} 请求触发限流（429），已无更多备用账号，限流响应原样透传",
+                        "账号「{}」的模型「{model_name}」触发限流（429），该账号 × 该模型冷却{note}，已无更多备用账号，限流响应原样透传",
                         account.name
                     ),
                 );
-                stream_response(&mut stream, resp, &dir, &account, &host, &path);
+                forward_rate_limited(&mut stream, &limited, &account, &host);
                 return;
             }
             Ok(resp) => {
@@ -825,16 +1063,38 @@ pub async fn free_models(
     }
 }
 
-/// 不该回给客户端的响应头（逐跳的，或 reqwest 已代劳解压后失效的）
+/// 不该回给客户端的响应头：逐跳头、reqwest 已代劳解压后失效的，
+/// 以及**由 `write_head` 用同一份值显式写出的** `content-type`——
+/// 放行它只会在下游多出一个重复头。
 fn response_hop_by_hop(name: &str) -> bool {
     [
         "connection",
         "content-length",
         "transfer-encoding",
         "content-encoding",
+        "content-type",
     ]
     .iter()
     .any(|h| name.eq_ignore_ascii_case(h))
+}
+
+/// 状态行里的原因短语。只列本代理会发出的状态码，其余兜底 OK
+/// （客户端的判断依据是数字，短语纯粹给人看的）。
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        302 => "Found",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "OK",
+    }
 }
 
 /// 写响应头。**一律用 chunked** —— 下游（CLI / 桌面端）按 SSE 解析，
@@ -845,19 +1105,7 @@ fn write_head(
     ctype: &str,
     headers: &[(String, String)],
 ) -> std::io::Result<()> {
-    let reason = match status {
-        200 => "OK",
-        302 => "Found",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        408 => "Request Timeout",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        500 => "Internal Server Error",
-        _ => "OK",
-    };
+    let reason = reason_phrase(status);
     let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {ctype}\r\n\
@@ -959,6 +1207,68 @@ fn stream_response(
     let _ = write_chunk_end(stream);
 }
 
+/// 读下来的上游 429：状态 / 内容类型 / 响应头 / 完整体。
+///
+/// 为什么非得整个读下来：重置时刻只写在 body 文案里（网关连 `Retry-After` 都不给）。
+/// 而一旦读走，这段响应就无法再流式透传——转发路径要自己把字节写回下游，
+/// 见 `forward_rate_limited`。
+struct RateLimited {
+    status: u16,
+    ctype: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+/// 把上游 429 收全（体很小，网关只回一段错误 JSON）
+async fn read_rate_limited(resp: reqwest::Response) -> RateLimited {
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter(|(k, _)| !response_hop_by_hop(k.as_str()))
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+    RateLimited {
+        status,
+        ctype,
+        headers,
+        body,
+    }
+}
+
+/// 把读下来的 429 原样写回下游（替代流式透传）。
+///
+/// 用 `Content-Length` 而不是 chunked，与网关自己发 429 的形态一致——
+/// 一段错误 JSON 不必套成 SSE 帧，客户端也少一层解析。
+fn forward_rate_limited(
+    stream: &mut TcpStream,
+    rl: &RateLimited,
+    account: &accounts::Account,
+    host: &str,
+) {
+    let mut extra: Vec<(&str, &str)> = rl
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    // 与 stream_response 保持一致：让客户端看得出这次是谁接的
+    extra.push(("X-Proxy-Account-Id", &account.id));
+    extra.push(("X-Proxy-Host", host));
+    respond(stream, rl.status, &rl.ctype, &rl.body, &extra);
+}
+
 impl Request {
     /// 头结束（含 `\r\n\r\n`）之后的起始偏移
     fn head_end(&self) -> usize {
@@ -967,23 +1277,22 @@ impl Request {
 }
 
 /// 粘滞是否命中：命中返回账号 id，顺手清掉过期项。
-fn sticky_hit(conv: &str) -> Option<String> {
+fn sticky_hit(conv: &str, model: Option<&str>) -> Option<String> {
     let mut map = sticky().lock().ok()?;
     map.retain(|_, (at, _)| at.elapsed() < STICKY_TTL);
-    let (at, id) = map.get_mut(conv)?;
+    let (at, id) = map.get_mut(&sticky_key(conv, model))?;
     *at = Instant::now();
     Some(id.clone())
 }
 
-/// 写入/刷新会话粘滞。返回 true 表示该会话**换到了新账号**（首次上代理或被切换），
-/// 调用方据此写「开始使用账号」事件；同一会话的后续请求返回 false，不刷屏。
-fn sticky_put(conv: &str, account_id: String) -> bool {
+/// 写入/刷新会话粘滞。返回 true 表示该「会话 × 模型」**换到了新账号**
+/// （首次上代理或被切换），调用方据此写「开始使用账号」事件；同一组合的后续
+/// 请求返回 false，不刷屏。
+fn sticky_put(conv: &str, model: Option<&str>, account_id: String) -> bool {
     if let Ok(mut map) = sticky().lock() {
-        let changed = map
-            .get(conv)
-            .map(|(_, id)| id != &account_id)
-            .unwrap_or(true);
-        map.insert(conv.to_string(), (Instant::now(), account_id));
+        let key = sticky_key(conv, model);
+        let changed = map.get(&key).map(|(_, id)| id != &account_id).unwrap_or(true);
+        map.insert(key, (Instant::now(), account_id));
         return changed;
     }
     false
@@ -1027,9 +1336,12 @@ fn billing_candidates(accounts: &[crate::accounts::Account], selected: &[String]
 
 /// 选出一个该用的账号。
 ///
+/// `model` 是本轮请求要用的模型：限流冷却（和因此产生的粘滞）都是按
+/// **账号 × 模型** 算的，选号必须知道模型是谁。
+///
 /// 候选集 = 设置里勾选的扣费账号（未勾选的不允许扣费；全不勾 = 全部可用），再做两层过滤：
 /// - **禁用（严格）**：`ban` 里的账号是本轮请求已试败的限流账号，直接剔除；剔完为空返回 None；
-/// - **冷却（软）**：近 10 分钟触发过限流的账号优先跳过，全员冷却则照常用。
+/// - **冷却（软）**：对本模型仍在限流窗口内的账号优先跳过，全员冷却则照常用。
 ///
 /// 候选集内的优先级从高到低：
 /// 1. **会话粘滞**——一次对话中途换账号会丢上下文；粘滞账号若已被移出候选集/在冷却则视为未命中；
@@ -1041,6 +1353,7 @@ async fn choose_account(
     dir: &PathBuf,
     conv: Option<&str>,
     ban: &[String],
+    model: Option<&str>,
 ) -> Option<crate::accounts::Account> {
     let settings = accounts::load_settings(dir);
     let mut all = accounts::load_accounts(dir);
@@ -1056,11 +1369,11 @@ async fn choose_account(
     if accounts.is_empty() {
         return None;
     }
-    let usable = available_candidates(&accounts, |a| cooling(&a.id));
+    let usable = available_candidates(&accounts, |a| cooling(&a.id, model));
 
     // 1) 已在进行的会话：继续用同一个账号（除非它已被移出可用集）
     if let Some(conv) = conv {
-        if let Some(id) = sticky_hit(conv) {
+        if let Some(id) = sticky_hit(conv, model) {
             if let Some(a) = usable.iter().find(|a| a.id == id) {
                 return Some(a.clone());
             }
@@ -1112,7 +1425,7 @@ async fn choose_account(
         let _ = accounts::save_accounts(dir, &merged);
     }
     if let Some(conv) = conv {
-        if sticky_put(conv, account.id.clone()) {
+        if sticky_put(conv, model, account.id.clone()) {
             // 该会话第一次走上代理，或被切到了新账号 —— 记一条「开始使用」事件
             stealth::journal_append(
                 dir,
@@ -1137,19 +1450,7 @@ fn respond(
     body: &[u8],
     extra: &[(&str, &str)],
 ) {
-    let reason = match status {
-        200 => "OK",
-        302 => "Found",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        408 => "Request Timeout",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        500 => "Internal Server Error",
-        _ => "OK",
-    };
+    let reason = reason_phrase(status);
     let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -1330,7 +1631,8 @@ mod tests {
         assert!(response_hop_by_hop("transfer-encoding"));
         // reqwest 已代劳解压，这个头留着会让对端以为内容还是 gzip
         assert!(response_hop_by_hop("content-encoding"));
-        assert!(!response_hop_by_hop("Content-Type"));
+        // 内容类型由 write_head 用同一个值显式写出，放行它下游会出现重复头
+        assert!(response_hop_by_hop("Content-Type"));
         assert!(!response_hop_by_hop("X-Request-Id"));
     }
 
@@ -1338,33 +1640,188 @@ mod tests {
     fn sticky_session_reuses_the_same_account() {
         // 一次对话中途换账号会丢上下文，必须粘住
         let conv = "conv-abc";
-        assert!(sticky_hit(conv).is_none(), "首次访问不该命中");
-        sticky_put(conv, "acct-1".into());
-        assert_eq!(sticky_hit(conv).as_deref(), Some("acct-1"));
-        sticky_put(conv, "acct-2".into());
+        let m = Some("hy3");
+        assert!(sticky_hit(conv, m).is_none(), "首次访问不该命中");
+        sticky_put(conv, m, "acct-1".into());
+        assert_eq!(sticky_hit(conv, m).as_deref(), Some("acct-1"));
+        sticky_put(conv, m, "acct-2".into());
         assert_eq!(
-            sticky_hit(conv).as_deref(),
+            sticky_hit(conv, m).as_deref(),
             Some("acct-2"),
             "同一会话被改写后应跟随最新值"
         );
         // 别的会话互不干扰
-        assert!(sticky_hit("conv-other").is_none());
+        assert!(sticky_hit("conv-other", m).is_none());
+    }
+
+    /// 回归：粘滞与限流冷却同为「账号 × 模型」粒度。以前的实现只有会话一个维度，
+    /// 于是辅助小模型（0 积分的 hy3）吃一次 429 换号，就把整段对话连同主模型一起搬走。
+    #[test]
+    fn sticky_is_scoped_per_model() {
+        let conv = "conv-multi";
+        let main = Some("deepseek-v4.1-flash");
+        let side = Some("hy3");
+        sticky_put(conv, main, "acct-main".into());
+        sticky_put(conv, side, "acct-side".into());
+        assert_eq!(sticky_hit(conv, main).as_deref(), Some("acct-main"));
+        assert_eq!(sticky_hit(conv, side).as_deref(), Some("acct-side"));
+        // 非对话请求（模型未知）用空串占位，也是一个独立维度
+        assert!(sticky_hit(conv, None).is_none());
+        sticky_put(conv, None, "acct-other".into());
+        assert_eq!(sticky_hit(conv, None).as_deref(), Some("acct-other"));
+        assert_eq!(
+            sticky_hit(conv, side).as_deref(),
+            Some("acct-side"),
+            "占位维度不该覆盖同一个会话里具体模型的粘滞"
+        );
     }
 
     #[test]
     fn sticky_entry_expires_after_ttl() {
         let conv = "conv-expire";
-        sticky_put(conv, "acct-1".into());
+        let m = Some("hy3");
+        sticky_put(conv, m, "acct-1".into());
         // 把最后命中时刻拨回 TTL 之前
-        if let Ok(mut m) = sticky().lock() {
-            if let Some((at, _)) = m.get_mut(conv) {
+        if let Ok(mut map) = sticky().lock() {
+            if let Some((at, _)) = map.get_mut(&sticky_key(conv, m)) {
                 *at = Instant::now() - STICKY_TTL - Duration::from_secs(1);
             }
         }
         assert!(
-            sticky_hit(conv).is_none(),
+            sticky_hit(conv, m).is_none(),
             "超过 TTL 的粘滞必须释放，好让新会话重新按积分选号"
         );
+    }
+
+    // ---- 限流冷却：重置时刻解析 + 「账号 × 模型」粒度 ----
+
+    /// 线上真实抓到的 429 报文（2026-09-14 18:06，账号 waxiloao 用 hy3 触发，
+    /// 两个免费探测都打到它）。网关 `Server: APISIX/3.9.1` **不给 `Retry-After` 头**，
+    /// 重置时刻只写在这段中文文案里。
+    const REAL_429_BODY: &str = r#"{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-14 19:35:25 UTC+8 重置，您也可以切换其他模型继续使用。","requestId":"64bfbf60-0dcc-4480-8a41-6441ebe672c5"}"#;
+
+    #[test]
+    fn reads_reset_instant_out_of_the_gateway_message() {
+        let (ms, source) = limit_until_ms(&[], REAL_429_BODY.as_bytes(), 0).unwrap();
+        assert_eq!(source, LimitSource::Body);
+        // 用固定 +08:00 还原，断言与文案逐字一致（不依赖跑测试的机器时区）
+        let east8 = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let got = chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .with_timezone(&east8)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        assert_eq!(got, "2026-09-14 19:35:25");
+
+        // 文案给的是**绝对时刻**而不是「now + N 秒」：换一个 now 必须解出同一个瞬间，
+        // 这正是「按时间节点封禁」能成立的前提
+        assert_eq!(
+            limit_until_ms(&[], REAL_429_BODY.as_bytes(), 1_700_000_000_000).map(|x| x.0),
+            Some(ms)
+        );
+
+        // 文案不带时区偏移 → 按本机时区解释
+        let (local_ms, _) = limit_until_ms(&[], "将在 2026-09-14 19:35:25 重置".as_bytes(), 0)
+            .expect("无偏移的文案也该能解析");
+        let local = chrono::DateTime::from_timestamp_millis(local_ms)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(local.format("%H:%M:%S").to_string(), "19:35:25");
+    }
+
+    #[test]
+    fn reset_instant_falls_back_to_headers_then_gives_up() {
+        let h = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        // Retry-After：秒数
+        assert_eq!(
+            limit_until_ms(&h("Retry-After", "42"), b"", 1000),
+            Some((1000 + 42_000, LimitSource::RetryAfter))
+        );
+        // Retry-After：HTTP-date
+        let (ms, src) =
+            limit_until_ms(&h("retry-after", "Mon, 14 Sep 2026 11:35:25 GMT"), b"", 0).unwrap();
+        assert_eq!(src, LimitSource::RetryAfter);
+        assert_eq!(
+            chrono::DateTime::from_timestamp_millis(ms).unwrap().timestamp(),
+            1_789_385_725
+        );
+        // X-RateLimit-Reset：unix 秒 / unix 毫秒 / 秒差 三种数量级都要认
+        assert_eq!(
+            limit_until_ms(&h("X-RateLimit-Reset", "1789385725"), b"", 0),
+            Some((1_789_385_725_000, LimitSource::ResetHeader))
+        );
+        assert_eq!(
+            limit_until_ms(&h("X-RateLimit-Reset", "1789385725000"), b"", 0),
+            Some((1_789_385_725_000, LimitSource::ResetHeader))
+        );
+        assert_eq!(
+            limit_until_ms(&h("X-RateLimit-Reset-After", "30"), b"", 1000),
+            Some((31_000, LimitSource::ResetHeader))
+        );
+        // 头读不出来就落到 body
+        assert_eq!(
+            limit_until_ms(&h("Retry-After", "soon"), REAL_429_BODY.as_bytes(), 0).map(|x| x.1),
+            Some(LimitSource::Body)
+        );
+        // 都不行就是 None：调用方退到兜底时长，宁可保守也不能瞎猜一个时刻
+        assert!(limit_until_ms(&h("Retry-After", "-1"), b"{}", 0).is_none());
+        assert!(limit_until_ms(&[], b"<html>429 Too Many Requests</html>", 0).is_none());
+    }
+
+    #[test]
+    fn cooldown_is_scoped_to_account_times_model_and_clamped() {
+        if let Ok(mut m) = cooldown().lock() {
+            m.clear();
+        }
+        let now = now_ms();
+        // 容差 2s：判定用的 now 一定不早于上面这个 now，夹取基准也会随之右移
+        let max_allowed = now + RATE_LIMIT_MAX.as_millis() as i64 + 2000;
+        let min_allowed = now + RATE_LIMIT_MIN.as_millis() as i64 - 2000;
+        // 离谱地远（时钟偏差 / 文案写错）→ 夹到上限，不能把账号锁死
+        assert!(
+            set_cooldown("acct", "hy3", i64::MAX, LimitSource::Body).until_ms <= max_allowed
+        );
+        // 已经过去的时刻 → 至少保留下限，否则下一个请求立刻撞回同一个 429
+        assert!(set_cooldown("acct2", "hy3", 0, LimitSource::Body).until_ms >= min_allowed);
+
+        // 核心粒度：只封「这个账号 × 这个模型」
+        set_cooldown("acct3", "hy3", now + 3_600_000, LimitSource::Body);
+        assert!(cooling("acct3", Some("hy3")));
+        assert!(
+            !cooling("acct3", Some("deepseek-v4.1-flash")),
+            "同账号的其它模型不该被牵连——实测 hy3 吃 429 时主模型依然 200"
+        );
+        assert!(!cooling("acct-other", Some("hy3")), "别的账号不受影响");
+        assert!(!cooling("acct3", None), "模型未知（非对话请求）不参与冷却判定");
+
+        // 过期记录顺手清掉，常年常驻不会攒垃圾
+        if let Ok(mut m) = cooldown().lock() {
+            m.clear();
+            m.insert(
+                RateKey {
+                    account_id: "stale".into(),
+                    model: "hy3".into(),
+                },
+                CooldownEntry {
+                    until_ms: now_ms() - 1,
+                    source: LimitSource::Body,
+                },
+            );
+        }
+        assert!(!cooling("stale", Some("hy3")));
+        assert!(
+            cooldown().lock().map(|m| m.is_empty()).unwrap_or(false),
+            "过期条目应被顺手清理"
+        );
+
+        // 日志文案：上游给了要写解禁时刻，没给要写明是兜底
+        let given = cooldown_note(set_cooldown("a", "m", now + 90 * 60_000, LimitSource::Body));
+        assert!(given.contains("约 90 分钟"), "{given}");
+        let fallback = cooldown_note(CooldownEntry {
+            until_ms: now_ms() + RATE_LIMIT_FALLBACK.as_millis() as i64,
+            source: LimitSource::Fallback,
+        });
+        assert!(fallback.contains("上游未给"), "{fallback}");
     }
 
     /// 回归：线上 400 事故的根因 —— 监听 socket 非阻塞时，**Windows 会把非阻塞状态
@@ -1530,6 +1987,111 @@ mod tests {
         assert!(out.contains("data: {\"a\":1}"), "SSE 帧要透传：{out:?}");
         assert!(out.contains("data: [DONE]"));
         assert!(out.ends_with("0\r\n\r\n"), "必须以终止帧收尾：{out:?}");
+    }
+
+    /// 端到端：mock 上游回一个**真实形态**的 429（APISIX 网关、时间节点只写在文案里），
+    /// 走通「读全 429 → 解析重置时刻 → 原样写回下游」这条链路。
+    ///
+    /// 这是本次改动最容易写错的接缝：429 一旦读进内存就没法再流式透传，
+    /// 回写必须自己把状态码、报文、代理头都写对，且字节要与上游一字不差。
+    #[test]
+    fn rate_limited_response_is_read_parsed_and_forwarded() {
+        // 1) mock 上游：真实 429 报文
+        let up = TcpListener::bind("127.0.0.1:0").unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = up.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf); // 读掉请求头，读多少算多少
+                let head = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\n\
+                     Content-Type: application/json; charset=utf-8\r\n\
+                     Server: APISIX/3.9.1\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    REAL_429_BODY.len()
+                );
+                let _ = s.write_all(head.as_bytes());
+                let _ = s.write_all(REAL_429_BODY.as_bytes());
+                let _ = s.flush();
+            }
+        });
+
+        let resp = tauri::async_runtime::block_on(async {
+            CLIENT
+                .post(format!("http://127.0.0.1:{up_port}/v2/chat/completions"))
+                .send()
+                .await
+        })
+        .expect("请求 mock 上游失败");
+        assert_eq!(resp.status().as_u16(), 429);
+
+        // 2) 读全 → 解析
+        let limited = tauri::async_runtime::block_on(read_rate_limited(resp));
+        assert_eq!(limited.status, 429);
+        assert!(
+            limited.ctype.starts_with("application/json"),
+            "内容类型要留住：{}",
+            limited.ctype
+        );
+        assert!(
+            !limited
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type")),
+            "内容类型由 write_head 显式写出，透传会让下游出现重复头"
+        );
+        assert_eq!(
+            limited.body,
+            REAL_429_BODY.as_bytes(),
+            "回写用的字节必须与上游一字不差"
+        );
+        assert_eq!(
+            limit_until_ms(&limited.headers, &limited.body, now_ms()).map(|x| x.1),
+            Some(LimitSource::Body)
+        );
+
+        // 3) 原样写回下游
+        let down = TcpListener::bind("127.0.0.1:0").unwrap();
+        let down_port = down.local_addr().unwrap().port();
+        let mut client = TcpStream::connect(("127.0.0.1", down_port)).unwrap();
+        let mut server = down.accept().unwrap().0;
+        let acct = accounts::Account {
+            id: "acct-e2e".into(),
+            name: "端到端".into(),
+            phone: None,
+            token: "t".into(),
+            refresh_token: None,
+            expires_at: None,
+            base_url: None,
+            created_at: String::new(),
+            credit_snapshot: None,
+            checked_today: None,
+            last: None,
+        };
+        forward_rate_limited(&mut server, &limited, &acct, "mock.host");
+        drop(server); // 关写端，让客户端读到 EOF
+
+        let mut out = String::new();
+        let _ = client.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = client.read_to_string(&mut out);
+
+        assert!(
+            out.starts_with("HTTP/1.1 429 Too Many Requests\r\n"),
+            "状态行要带上正确的原因短语：{out:?}"
+        );
+        assert!(
+            out.contains(&format!("Content-Length: {}", REAL_429_BODY.len())),
+            "用 Content-Length 而非 chunked，与网关自己的 429 同形：{out:?}"
+        );
+        assert!(out.contains("X-Proxy-Account-Id: acct-e2e"), "要带上选中账号");
+        assert!(
+            !out.to_ascii_lowercase().matches("content-type:").count().gt(&1),
+            "内容类型只能出现一次：{out:?}"
+        );
+        // 面向用户的那半句（含重置时刻）必须完整到达客户端
+        assert!(out.contains("19:35:25 UTC+8"), "重置文案要透传：{out:?}");
+        assert!(out.contains("切换其他模型继续使用"), "{out:?}");
     }
 
     #[test]
