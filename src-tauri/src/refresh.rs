@@ -24,7 +24,6 @@
 use crate::oauth::norm_ts;
 use serde::Serialize;
 use serde_json::Value;
-use std::time::Duration;
 
 /// 续签阈值：剩余有效期不足 48 小时就自动续一次。
 ///
@@ -98,18 +97,21 @@ pub(crate) fn parse_refresh_response(v: &Value, now_ms: i64) -> Result<Refreshed
 /// 发起一次续签。`host` 为账号所属域（如 `https://www.workbuddy.cn`）。
 pub async fn refresh(host: &str, token: &str, refresh_token: &str) -> Result<Refreshed, String> {
     let url = format!("{}/v2/plugin/auth/token/refresh", host.trim_end_matches('/'));
+    // 走插件授权族那一套头（`http::client_headers()`：Accept + Accept-Language），
+    // **不声明 `x-client-platform`**——续签端点是 `/v2/plugin/auth/*`，与 oauth 的
+    // state / token 同族，不是计费接口。这条路历史上本来就不带它、续签一直正常；
+    // 上一轮「统一身份」时顺手给加上了，反倒造出「同族两套头」的不一致。
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent(concat!("WorkBuddyAssistant/", env!("CARGO_PKG_VERSION")))
+        .timeout(crate::http::TIMEOUT)
+        .user_agent(crate::http::UA)
+        .default_headers(crate::http::client_headers())
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败：{e}"))?;
     let resp = client
         .post(&url)
-        .header("accept", "application/json")
-        .header("content-type", "application/json")
         .header("X-Refresh-Token", refresh_token)
         .bearer_auth(token)
-        .body("{}")
+        .json(&serde_json::json!({}))
         .send()
         .await
         .map_err(|e| format!("请求续签接口失败：{e}"))?;

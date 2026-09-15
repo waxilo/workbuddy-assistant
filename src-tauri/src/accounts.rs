@@ -84,6 +84,12 @@ pub struct Settings {
     /// 定时签到时刻，24 小时制 `HH:MM`（应用需保持运行才会触发）
     #[serde(default = "default_schedule_time")]
     pub schedule_time: String,
+    /// 定时签到的随机时间窗（分钟）：当天实际触发时刻 = `schedule_time` + `[0, 窗口]` 内随机。
+    ///
+    /// 「每天同一分钟触发」是脚本最好认的特征，给一个窗口就能让每天都不一样；
+    /// 当天挑定的时刻会写进 `schedule_state.json` 复用，重启不会重新摇。0 = 关闭随机。
+    #[serde(default = "default_schedule_window")]
+    pub schedule_window_minutes: u32,
     /// 通知总开关（关掉后定时与手动都不推送）
     #[serde(default)]
     pub notify_enabled: bool,
@@ -118,6 +124,39 @@ pub struct Settings {
     /// 随机间隔上限（秒）；实际间隔在 2..=max 之间取值
     #[serde(default = "default_stagger_max")]
     pub stagger_max_seconds: u32,
+    /// 批量签到时随机打乱账号顺序。
+    ///
+    /// 顺序本身也是特征：每次都按账号列表的固定先后连发，等于把「同一批账号」
+    /// 直接写进请求序列里。打乱只影响**发请求的次序**，列表展示与落盘顺序不变。
+    #[serde(default = "default_true")]
+    pub shuffle_checkin_order: bool,
+    /// 手动「全部签到」也加账号间隔（默认开）。
+    ///
+    /// 手动路径曾为了「点完就想看结果」跳过等待，于是它成了全程唯一的瞬时连发入口——
+    /// 风控看到的恰好就是那一串几秒内完成的签到。
+    #[serde(default = "default_true")]
+    pub manual_stagger: bool,
+    /// 手动「全部签到」的间隔上限（秒）；实际在 2..=max 之间取值。
+    /// 比自动签到小得多：手动场景还得让人等得下去。
+    #[serde(default = "default_manual_stagger_max")]
+    pub manual_stagger_max_seconds: u32,
+    /// 限流（429）时是否在同一会话内换备用账号。
+    ///
+    /// true = 无感续跑，但同一个会话会出现「中途换凭证」——正常用户的一个会话
+    /// 自始至终只有一个账号，这在风控眼里是极高异常值。false = 防御优先：
+    /// 429 原样透传、不记冷却，该会话不会被切到别的账号上。
+    #[serde(default = "default_true")]
+    pub failover_on_rate_limit: bool,
+    /// 每日积分日报：应用常驻时每天在 `report_time` 结算一次
+    /// （统计「上次结算 → 本次结算」的消耗与新增，见 `ledger`）。
+    #[serde(default = "default_true")]
+    pub report_enabled: bool,
+    /// 日报结算时刻，24 小时制 `HH:MM`（默认 12:00）
+    #[serde(default = "default_report_time")]
+    pub report_time: String,
+    /// 日报是否推送到 webhook（复用通知总开关 `notify_enabled` 与 `notify_webhook`）
+    #[serde(default = "default_true")]
+    pub notify_on_report: bool,
 }
 
 impl Default for Settings {
@@ -127,6 +166,7 @@ impl Default for Settings {
             auto_checkin_on_start: false,
             schedule_enabled: false,
             schedule_time: default_schedule_time(),
+            schedule_window_minutes: default_schedule_window(),
             notify_enabled: false,
             notify_webhook: String::new(),
             notify_on_schedule: true,
@@ -137,13 +177,38 @@ impl Default for Settings {
             rate_limit_models: Vec::new(),
             stagger_checkin: true,
             stagger_max_seconds: default_stagger_max(),
+            shuffle_checkin_order: true,
+            manual_stagger: true,
+            manual_stagger_max_seconds: default_manual_stagger_max(),
+            failover_on_rate_limit: true,
+            report_enabled: true,
+            report_time: default_report_time(),
+            notify_on_report: true,
         }
     }
+}
+
+/// 日报结算时刻：默认 12:00。
+///
+/// 选中午而不是零点：签到在上午跑完，12 点结算刚好把「上午签到拿到的」与
+/// 「白天用掉的」放在两个窗口里看，不会混在同一条日报里。
+fn default_report_time() -> String {
+    "12:00".to_string()
 }
 
 /// 风控随机间隔默认上限：45 秒足够打散节奏，又不至于让「全部签到」等太久
 fn default_stagger_max() -> u32 {
     45
+}
+
+/// 手动「全部签到」的间隔上限：8 秒。用户是主动点的，等待要明显短于自动签到
+fn default_manual_stagger_max() -> u32 {
+    8
+}
+
+/// 定时签到的随机窗口：90 分钟。既能消掉「每天同一分钟」，又不会把签到推到太晚
+fn default_schedule_window() -> u32 {
+    90
 }
 
 /// 规范化时刻字符串：接受 `9:7` / `09:07` / 首尾空格，统一输出 `HH:MM`。
@@ -280,6 +345,19 @@ mod tests {
         assert!(!s.notify_on_manual);
         // 优先扣费账号：老配置没有 → 空（= 全部账号都可作为备选）
         assert!(s.billing_account_ids.is_empty());
+        // 风控相关字段同样必须落到默认值，否则升级后老用户会突然丢掉整套打散策略
+        assert_eq!(s.schedule_window_minutes, 90);
+        assert!(s.stagger_checkin);
+        assert_eq!(s.stagger_max_seconds, 45);
+        assert!(s.shuffle_checkin_order);
+        assert!(s.manual_stagger);
+        assert_eq!(s.manual_stagger_max_seconds, 8);
+        // 限流换号默认保持开启 = 与升级前的行为一致（关掉才是主动选的防御姿态）
+        assert!(s.failover_on_rate_limit);
+        // 积分日报：默认开启、12:00 结算、跟着推送一起发（老配置没有这些字段）
+        assert!(s.report_enabled);
+        assert_eq!(s.report_time, "12:00");
+        assert!(s.notify_on_report);
     }
 
     #[test]

@@ -6,6 +6,11 @@
 //!   2. 应用常常是在预定时刻之后才被打开的（比如 09:10 才开机）。
 //! 所以判定条件是「今天还没跑过 && 已过设定时刻但不超过 30 分钟」。
 //!
+//! 设定时刻是**窗口起点**：`schedule_window_minutes > 0` 时，当天实际触发时刻会在
+//! `[设定时刻, +窗口]` 内随机挑一分钟，挑完落盘、当天不再变（见 [`target_time`]）。
+//! 固定在同一分钟触发是脚本最好认的特征，窗口把它抹掉；`window = 0` 即回到
+//! 「精确到分钟」的老行为。
+//!
 //! 跨启动去重靠 `schedule_state.json`（只记最后一次执行的日期），
 //! 这样重启应用不会在补跑窗口内重复签一遍。
 //!
@@ -15,10 +20,20 @@
 //! 扫描间隔落盘在 `schedule_state.json`，避免每次启动/每跳都打接口。
 //!
 //! 通知只在 `notify_enabled && notify_on_schedule` 时发送，且**失败不影响签到**。
+//!
+//! 除定时签到外，本模块还管两件事，各自有独立开关与时刻、互不影响：
+//!
+//! - 自动续签（见 [`maybe_auto_refresh`]）：剩余有效期不足 48 小时就静默续一次。
+//! - **每日积分日报**（见 [`maybe_settle_report`]）：到点结算「上次结算以来」的
+//!   消耗与新增，并按 `notify_on_report` 推送。它**没有随机时间窗** —— 触发时刻
+//!   就是统计窗口的边界，抖动会让相邻两天的日报无法直接相加。统计口径见
+//!   [`crate::ledger`] 的模块说明。
 
 use crate::accounts::{self, Settings};
 use crate::commands;
+use crate::ledger;
 use crate::notify;
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,6 +50,20 @@ const REFRESH_SCAN_MS: i64 = 12 * 60 * 60 * 1000;
 pub const EVENT: &str = "checkin-scheduled";
 /// 自动续签事件（payload：续签成功的账号数），前端据此刷新列表
 pub const REFRESH_EVENT: &str = "auto-refreshed";
+/// 积分日报结算完成事件，前端据此刷新日报列表
+pub const REPORT_EVENT: &str = "credit-report-settled";
+
+/// 当天随机挑定的定时签到时刻。
+///
+/// 必须落盘：否则每 30s 一跳都会重摇一次（「等时钟走过刚摇出来的那一分钟」这种判定
+/// 在每跳都换目标时形同虚设），重启也会把当天已经用过的时刻换掉。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct DayTarget {
+    /// 归属日期（`YYYY-MM-DD`）
+    date: String,
+    /// 当天实际触发时刻（`HH:MM`）
+    at: String,
+}
 
 #[derive(Serialize, Deserialize, Default)]
 struct ScheduleState {
@@ -44,6 +73,15 @@ struct ScheduleState {
     /// 最后一次自动续签扫描的时刻（毫秒时间戳）
     #[serde(default)]
     last_refresh_scan_ms: Option<i64>,
+    /// 今天随机挑定的触发时刻（跨天自动重挑；见 [`target_time`]）
+    #[serde(default)]
+    today_target: Option<DayTarget>,
+    /// 最后一次积分日报结算的日期（`YYYY-MM-DD`）
+    ///
+    /// 与 `last_run_date` 分开记：日报与定时签到是两个独立开关、两个时刻，
+    /// 共用一个字段会让「关了定时签到」连带把日报的去重也弄乱。
+    #[serde(default)]
+    last_report_date: Option<String>,
 }
 
 fn state_file(dir: &Path) -> PathBuf {
@@ -69,6 +107,58 @@ fn save_state(dir: &Path, st: &ScheduleState) {
     if fs::write(&tmp, json).is_ok() && fs::rename(&tmp, &target).is_ok() {
         accounts::set_private_permissions(&target);
     }
+}
+
+/// 今天该在几点几分触发。
+///
+/// - 已经为**同一个日期**挑过、且旧目标仍落在当前窗口内 → 原样复用；
+/// - 否则在 `[base, base + window]` 内随机取一分钟；
+/// - `window == 0`（或 base 非法）→ 直接用 base，等于关掉随机、保留「精确到分钟」的老行为。
+///
+/// 窗口会被截断在当天 23:59 之内，绝不跨天——跨天会让 [`due_at`] 的「补跑窗口」
+/// 判定失去意义（今天的任务跑到明天零点后触发）。
+pub(crate) fn target_time(
+    date: &str,
+    base: &str,
+    window_minutes: u32,
+    existing: Option<&DayTarget>,
+) -> DayTarget {
+    if let Some(t) = existing.filter(|t| t.date == date && in_window(t, base, window_minutes)) {
+        return t.clone();
+    }
+    let at = chrono::NaiveTime::parse_from_str(base.trim(), "%H:%M")
+        .ok()
+        .filter(|_| window_minutes > 0)
+        .map(|t| {
+            let base_min = t.hour() * 60 + t.minute();
+            // 上限 23:59，保证不跨天
+            let span = window_minutes.min(24 * 60 - 1 - base_min);
+            let total = base_min + crate::rng::range(0, span as u64) as u32;
+            format!("{:02}:{:02}", total / 60, total % 60)
+        })
+        .unwrap_or_else(|| base.trim().to_string());
+    DayTarget {
+        date: date.to_string(),
+        at,
+    }
+}
+
+/// 旧目标是否仍落在 `[base, base + window]` 内。
+///
+/// 用它判断「设置改过了要不要重挑」：只按日期复用的话，用户把签到时刻从 09:00
+/// 改到 11:00 之后，那个 10:12 的旧目标既不在新窗口里、又已经过期（按补跑窗口
+/// 立刻触发一次），等于改了设置反而提前签了。
+fn in_window(target: &DayTarget, base: &str, window_minutes: u32) -> bool {
+    let (Ok(at), Ok(b)) = (
+        chrono::NaiveTime::parse_from_str(target.at.trim(), "%H:%M"),
+        chrono::NaiveTime::parse_from_str(base.trim(), "%H:%M"),
+    ) else {
+        // 两边都解析不出来时退化成字面比较：不相等就重挑
+        return target.at.trim() == base.trim();
+    };
+    let mins = |t: chrono::NaiveTime| t.hour() as i64 * 60 + t.minute() as i64;
+    let (at_m, base_m) = (mins(at), mins(b));
+    at_m >= base_m && at_m <= base_m + window_minutes as i64
 }
 
 /// 距上次自动续签扫描是否已满一个间隔（从未扫过 → 立刻扫）。
@@ -121,23 +211,41 @@ pub fn spawn(app: AppHandle) {
             // 自动续签与「定时签到」开关无关，单独判定
             maybe_auto_refresh(&app, &dir);
 
+            // 积分日报同理：有自己的开关与时刻，不受「定时签到」影响。
+            // 必须放在下面那个 continue 之前 —— 否则用户一关定时签到，日报也顺带没了
+            maybe_settle_report(&app, &dir, &settings);
+
             if !settings.schedule_enabled {
                 continue;
             }
             let mut state = load_state(&dir);
             let now = chrono::Local::now().naive_local();
-            if !due_at(now, &settings.schedule_time, state.last_run_date.as_deref()) {
+            let today = now.date().format("%Y-%m-%d").to_string();
+            // 当天目标时刻：第一次算出来后立刻落盘，之后每一跳都复用同一个值，
+            // 否则「随机窗口」每跳重摇一次，等于没加（详见 DayTarget）
+            let target = target_time(
+                &today,
+                &settings.schedule_time,
+                settings.schedule_window_minutes,
+                state.today_target.as_ref(),
+            );
+            if state.today_target.as_ref() != Some(&target) {
+                state.today_target = Some(target.clone());
+                save_state(&dir, &state);
+            }
+            if !due_at(now, &target.at, state.last_run_date.as_deref()) {
                 continue;
             }
 
             // 先落盘「今天已跑」再执行：万一执行中崩溃，也不会在补跑窗口里反复重试
-            state.last_run_date = Some(now.date().format("%Y-%m-%d").to_string());
+            state.last_run_date = Some(today.clone());
             save_state(&dir, &state);
             log_event(
                 &dir,
                 &format!(
-                    "触发定时签到（设定 {}，实际 {}）",
+                    "触发定时签到（设定 {}，今日随机目标 {}，实际 {}）",
                     settings.schedule_time,
+                    target.at,
                     now.format("%H:%M")
                 ),
             );
@@ -172,6 +280,56 @@ fn maybe_auto_refresh(app: &AppHandle, dir: &Path) {
             }
         }
         Err(e) => log_event(dir, &format!("自动续签异常：{e}")),
+    }
+}
+
+/// 每日积分日报：到点（默认 12:00）结算一次，并按设置推送。
+///
+/// 复用定时签到那套「到点即触发 + 补跑窗口」判定（[`due_at`]），理由相同：
+/// 应用常常是在预定时刻之后才被打开的，精确命中某一分钟并不现实。
+///
+/// **刻意不加随机时间窗**：日报不像签到那样有「被认成脚本」的风险；而它的触发时刻
+/// 就是统计窗口的边界 —— 让边界随机抖动，等于每天的统计区间都在飘，
+/// 「相邻两条能不能直接相加」就不再成立。用户要的是 12 点这个确定时点。
+fn maybe_settle_report(app: &AppHandle, dir: &Path, settings: &Settings) {
+    if !settings.report_enabled {
+        return;
+    }
+    let mut state = load_state(dir);
+    let now = chrono::Local::now().naive_local();
+    if !due_at(now, &settings.report_time, state.last_report_date.as_deref()) {
+        return;
+    }
+    // 先落盘「今天已结算」再执行：与定时签到同理，中途崩溃也不会在补跑窗口里重复结算
+    state.last_report_date = Some(now.date().format("%Y-%m-%d").to_string());
+    save_state(dir, &state);
+
+    match tauri::async_runtime::block_on(commands::settle_report_inner(app)) {
+        Ok(rep) => {
+            log_event(
+                dir,
+                &format!(
+                    "积分日报已结算：消耗 {:.2} / 新增 {:.2}（窗口 {} → {}）",
+                    rep.total_consumed, rep.total_gained, rep.window_from, rep.window_to
+                ),
+            );
+            let _ = app.emit(
+                REPORT_EVENT,
+                serde_json::json!({ "count": rep.accounts.len() }),
+            );
+            if settings.notify_enabled && settings.notify_on_report {
+                // 通知失败只记日志，绝不影响日报本身
+                let outcome = match tauri::async_runtime::block_on(notify::send(
+                    &settings.notify_webhook,
+                    &ledger::report_message(&rep),
+                )) {
+                    Ok(resp) => format!("日报通知已发送：{resp}"),
+                    Err(e) => format!("日报通知发送失败：{e}"),
+                };
+                log_event(dir, &outcome);
+            }
+        }
+        Err(e) => log_event(dir, &format!("积分日报结算异常：{e}")),
     }
 }
 
@@ -311,17 +469,88 @@ mod tests {
     fn state_round_trips_on_disk() {
         let dir = std::env::temp_dir().join(format!("wba-sched-{}", uuid::Uuid::new_v4()));
         assert!(load_state(&dir).last_run_date.is_none());
+        assert!(load_state(&dir).today_target.is_none());
         save_state(
             &dir,
             &ScheduleState {
                 last_run_date: Some("2026-09-12".into()),
                 last_refresh_scan_ms: Some(1_700_000_000_000),
+                today_target: Some(DayTarget {
+                    date: "2026-09-12".into(),
+                    at: "10:12".into(),
+                }),
+                last_report_date: Some("2026-09-12".into()),
             },
         );
         let loaded = load_state(&dir);
         assert_eq!(loaded.last_run_date.as_deref(), Some("2026-09-12"));
         assert_eq!(loaded.last_refresh_scan_ms, Some(1_700_000_000_000));
+        // 当天目标必须扛得住重启，否则「随机窗口」会被重启重新摇一次
+        assert_eq!(
+            loaded.today_target.as_ref().map(|t| t.at.as_str()),
+            Some("10:12")
+        );
+        // 日报与签到各记各的日期：两个开关独立，去重也必须独立
+        assert_eq!(loaded.last_report_date.as_deref(), Some("2026-09-12"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn target_time_without_window_stays_on_the_exact_minute() {
+        // 窗口 0 = 关掉随机，保持「精确到分钟」的老行为
+        assert_eq!(target_time("2026-09-12", "09:07", 0, None).at, "09:07");
+        // 非法时刻原样留着（due_at 会拒绝触发），不在这里瞎猜一个点
+        assert_eq!(target_time("2026-09-12", "aa:bb", 90, None).at, "aa:bb");
+    }
+
+    #[test]
+    fn target_time_lands_inside_the_window_and_is_stable_for_the_day() {
+        let first = target_time("2026-09-12", "08:00", 90, None);
+        assert!(in_window(&first, "08:00", 90), "落在窗口外：{}", first.at);
+        for _ in 0..100 {
+            assert_eq!(
+                target_time("2026-09-12", "08:00", 90, Some(&first)).at,
+                first.at,
+                "同一天重复调用不该重摇"
+            );
+        }
+        // 换一天就要重挑（值可以碰巧相同，但归属日期必须更新）
+        let next = target_time("2026-09-13", "08:00", 90, Some(&first));
+        assert_eq!(next.date, "2026-09-13");
+        assert!(in_window(&next, "08:00", 90));
+    }
+
+    #[test]
+    fn target_time_never_crosses_midnight() {
+        let lo = chrono::NaiveTime::from_hms_opt(23, 30, 0).unwrap();
+        let hi = chrono::NaiveTime::from_hms_opt(23, 59, 0).unwrap();
+        for _ in 0..200 {
+            let t = target_time("2026-09-12", "23:30", 90, None);
+            let at = chrono::NaiveTime::parse_from_str(&t.at, "%H:%M").unwrap();
+            assert!(at >= lo && at <= hi, "窗口被截断失败：{}", t.at);
+        }
+    }
+
+    #[test]
+    fn target_time_repicks_when_the_setting_moves_later() {
+        // 旧目标 09:40 对应的设置是 09:00 + 90min；用户把时刻改到 11:00 后
+        // 旧目标既不在新窗口里、按补跑窗口又会立刻触发一次 → 必须重挑
+        let stale = DayTarget {
+            date: "2026-09-12".into(),
+            at: "09:40".into(),
+        };
+        let t = target_time("2026-09-12", "11:00", 90, Some(&stale));
+        assert!(in_window(&t, "11:00", 90), "旧目标不该被复用：{}", t.at);
+
+        // 反向：设置改早时旧目标仍在新窗口内，继续用，不必重摇
+        let keep = DayTarget {
+            date: "2026-09-12".into(),
+            at: "10:12".into(),
+        };
+        assert_eq!(
+            target_time("2026-09-12", "09:00", 120, Some(&keep)).at,
+            "10:12"
+        );
     }
 
     #[test]

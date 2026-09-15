@@ -2,12 +2,15 @@ mod accounts;
 mod auth_file;
 mod checkin;
 mod commands;
+mod http;
+mod ledger;
 mod logs;
 mod netfix;
 mod notify;
 mod oauth;
 mod proxy;
 mod refresh;
+mod rng;
 mod scheduler;
 mod stealth;
 mod tray;
@@ -78,6 +81,10 @@ pub fn run() {
             commands::set_autostart,
             commands::get_checkin_logs,
             commands::clear_checkin_logs,
+            // 积分日报：每日 12 点结算「消耗 / 新增」，口径见 ledger 模块
+            commands::credit_reports,
+            commands::credit_reports_clear,
+            commands::credit_report_settle,
             commands::app_version,
             // 网络急救：扫出「调试残留的全局服务端点」并一键清除（含关闭本地反代）
             netfix::net_diagnose,

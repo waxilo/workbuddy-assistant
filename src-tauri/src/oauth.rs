@@ -257,10 +257,17 @@ pub(crate) fn parse_account_response(v: &Value) -> AccountInfo {
     AccountInfo { uid, nickname, phone }
 }
 
+/// 登录授权用的客户端。
+///
+/// 统一 UA 与 `http::client_headers()`（客户端自身的头——语言偏好描述的是这个应用本身，
+/// 与走哪个接口无关，所以这条路径同样该有），**不加 `x-client-platform`**：
+/// 这条路径走的是插件授权接口（`/v2/plugin/auth/*`），不是计费接口，
+/// 声明 `web` 属于无根据的说法，宁可不写。
 fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent(concat!("WorkBuddyAssistant/", env!("CARGO_PKG_VERSION")))
+        .timeout(crate::http::TIMEOUT)
+        .user_agent(crate::http::UA)
+        .default_headers(crate::http::client_headers())
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败：{e}"))
 }

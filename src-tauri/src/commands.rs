@@ -1,6 +1,7 @@
 use crate::accounts::{self, Account, Settings};
 use crate::auth_file::{self, LocalAccount};
 use crate::checkin;
+use crate::ledger;
 use crate::logs::{self, CheckinLog};
 use crate::notify;
 use crate::oauth;
@@ -65,6 +66,17 @@ pub(crate) async fn ensure_fresh_token(account: &mut Account) -> Result<bool, St
     Ok(true)
 }
 
+/// 这个账号接下来会真的发出续签请求吗？
+///
+/// 判定条件与 `ensure_fresh_token` 开头的守卫一致，并且共用同一个 `refresh::should_refresh`，
+/// 所以阈值只有一处定义、不会各写一套。之所以要提前问一次，是为了让批量循环**只为真正
+/// 会发生的请求**留间隔——续签本就是少数事件，若「全都不需要续签」的空转也被逐个账号拖住，
+/// 一次后台自检就要凭空多花十几秒。
+fn will_refresh(account: &Account) -> bool {
+    account.refresh_token.is_some()
+        && refresh::should_refresh(account.expires_at, chrono::Utc::now().timestamp_millis())
+}
+
 /// 自动续签全部账号（调度线程 / 启动自检调用）。
 ///
 /// 只在确实有账号被续签时才落盘；单个账号失败不中断其它账号，也不让整体返回 Err
@@ -75,14 +87,27 @@ pub async fn auto_refresh_all(app: &AppHandle) -> Result<AutoRefreshReport, Stri
     let mut refreshed = Vec::new();
     let mut failed = Vec::new();
     let mut changed = false;
+    // 上一个账号是否真的产生过出站请求：用来决定本账号前要不要让一拍。
+    // 两个条件同时成立才等（上次发过 + 这次也要发），缺一个等待就纯属拖延
+    let mut sent = false;
     for acct in accounts.iter_mut() {
+        let due = will_refresh(acct);
+        if sent && due {
+            // 自动续签是后台静默循环，用户完全看不见它连发——这条路径反而更该有节奏
+            crate::http::account_gap().await;
+        }
         match ensure_fresh_token(acct).await {
             Ok(true) => {
+                sent = true;
                 refreshed.push(acct.name.clone());
                 changed = true;
             }
             Ok(false) => {}
-            Err(e) => failed.push(format!("{}：{e}", acct.name)),
+            Err(e) => {
+                // 走到这里说明请求已经发出去了（只是失败），流量一样算数
+                sent = true;
+                failed.push(format!("{}：{e}", acct.name));
+            }
         }
     }
     if changed {
@@ -467,7 +492,7 @@ pub async fn checkin_one(app: AppHandle, id: String) -> Result<Account, String> 
 pub async fn checkin_all(app: AppHandle) -> Result<Vec<Account>, String> {
     let dir = data_dir(&app);
     let settings = accounts::load_settings(&dir);
-    // 手动「全部签到」不启用风控间隔：用户主动触发，期望尽快完成
+    // 手动「全部签到」走短间隔档（manual_stagger_*）：同样打散顺序与节奏，只是等待短得多
     let results = checkin_all_inner(&app, false).await?;
     // 手动批量签到是否推送由设置决定（默认关，免得连点几下就把通知刷屏）
     if settings.notify_enabled && settings.notify_on_manual {
@@ -482,6 +507,9 @@ pub async fn checkin_all(app: AppHandle) -> Result<Vec<Account>, String> {
 /// 2. **积分余量**：用快照里的剩余积分回填 `last.balance`（账号列表「剩余积分」列展示）；
 /// 3. **签到状态**：只读查询「今日是否已签到」（不打签到接口、零副作用），写入 `checked_today`。
 ///
+/// 顺带把同一份响应里的**逐包明细**喂进积分台账（见 [`crate::ledger`]）——不额外打接口，
+/// 但让日报窗口里的采样更密：消耗与新增读的都是累计量，采样越密越不会漏。
+///
 /// 不打签到接口——已签到的账号再打只会拿到 400「已签到」，看最新状态没必要绕这一圈。
 /// 逐账号查询、单个失败不改原值（界面保留旧数），最后整体保存一次。
 #[tauri::command]
@@ -492,16 +520,37 @@ pub async fn refresh_all(app: AppHandle) -> Result<Vec<Account>, String> {
         return Ok(Vec::new());
     }
     let settings = accounts::load_settings(&dir);
-    let client = reqwest::Client::new();
+    // 走统一的账号接口客户端：这条路径过去是裸 `reqwest::Client::new()`，
+    // 于是同一个 `get-user-resource` 接口在「刷新」里不带 UA / x-client-platform、
+    // 在「签到」里带——同一个程序对同一个接口发出两套头，比固定身份更显眼
+    let client = crate::http::api_client();
+    let mut led = ledger::load_ledger(&dir);
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     for i in 0..accounts.len() {
+        // 账号之间留抖动：每账号三四个请求，N 个账号零间隔打出去就是脚本形态。
+        // 首个账号不等（它前面本就没有请求，也让首条结果尽快回到界面）
+        if i > 0 {
+            crate::http::account_gap().await;
+        }
         // 凭证临期的先续签，避免拿着过期 token 把「没积分」误判成「查不到」
         let _ = ensure_fresh_token(&mut accounts[i]).await;
         let host = account_host(&accounts[i]);
-        // 1) 积分快照：剩余积分 + 最早过期时间（持久化，供路由与展示）
-        let snap = checkin::fetch_credit_snapshot(&client, &host, &accounts[i].token).await;
-        // 2) 积分余量（UI「剩余积分」列）：用快照里的 credits 回填（在把 snap 移入 credit_snapshot 前读出）
-        let balance_from_snap = snap.credits;
-        accounts[i].credit_snapshot = Some(snap);
+        // 1) 资源视图：剩余积分 + 最早过期时间 + 逐包明细（明细只进台账，不落 accounts.json）
+        let view = checkin::fetch_resource_view(&client, &host, &accounts[i].token).await;
+        if !view.packages.is_empty() {
+            ledger::merge_account(
+                led.accts.entry(accounts[i].id.clone()).or_default(),
+                &view.packages,
+                &now,
+            );
+        }
+        // 2) 积分余量（UI「剩余积分」列）：用视图里的 credits 回填
+        let balance_from_snap = view.credits;
+        accounts[i].credit_snapshot = Some(accounts::CreditSnapshot {
+            credits: view.credits,
+            earliest_expiry_ms: view.earliest_expiry_ms,
+            fetched_at: Some(now.clone()),
+        });
         if let Some(b) = balance_from_snap {
             let rec = accounts[i].last.get_or_insert_with(|| accounts::CheckinRecord {
                 success: false,
@@ -521,6 +570,9 @@ pub async fn refresh_all(app: AppHandle) -> Result<Vec<Account>, String> {
         let checked = checkin::query_checked_today(&accounts[i], &settings.default_base_url).await;
         accounts[i].checked_today = checked;
     }
+    led.samples += 1;
+    // 台账落盘失败不影响刷新结果（它只是统计，丢了下次采样会重新累积）
+    let _ = ledger::save_ledger(&dir, &led);
     let cloned = accounts.clone();
     accounts::save_accounts(&dir, &accounts).map_err(|e| e.to_string())?;
     Ok(cloned)
@@ -531,12 +583,16 @@ pub async fn refresh_all(app: AppHandle) -> Result<Vec<Account>, String> {
 /// 抽成独立函数是因为定时调度（`scheduler`）与手动命令共用同一套逻辑——
 /// 后台线程走不了 Tauri 的 invoke，只能直接调它。
 ///
-/// `stagger` 控制是否启用「多账号风控间隔」：
-/// - 定时自动签到传 `true`（同一 IP 瞬时连发多账号请求容易被风控，需要打散）；
-/// - 页面手动「全部签到」传 `false`（用户主动点、期望尽快出结果，不故意等待）。
+/// `scheduled` 决定用哪一档「风控节奏」（见 [`gap_seconds`]）：
+/// - `true`：定时/自动触发，两次请求之间随机歇 `stagger_max_seconds` 以内（默认 45s 档）；
+/// - `false`：用户主动点（含启动即签到），走 `manual_stagger_max_seconds`（默认 8s 档）——
+///   一样要等，只是等得短，避免手动路径成为全程唯一的瞬时连发入口。
+///
+/// 访问顺序由 [`visit_order`] 决定：默认打乱。**落盘与返回值仍按原顺序**，
+/// 所以列表不会因为打乱而跳来跳去。
 pub(crate) async fn checkin_all_inner(
     app: &AppHandle,
-    stagger: bool,
+    scheduled: bool,
 ) -> Result<Vec<Account>, String> {
     let dir = data_dir(app);
     let mut accounts = accounts::load_accounts(&dir);
@@ -544,14 +600,10 @@ pub(crate) async fn checkin_all_inner(
         return Ok(Vec::new());
     }
     let settings = accounts::load_settings(&dir);
-    for i in 0..accounts.len() {
-        // 风控预防：从第二个账号起随机歇几秒再签，避免同一 IP 瞬时连发多账号请求。
-        // 仅自动签到启用（手动「全部签到」跳过，避免用户等待）。
-        if stagger && i > 0 {
-            if let Some(secs) = stagger_seconds(settings.stagger_checkin, settings.stagger_max_seconds)
-            {
-                tokio::time::sleep(std::time::Duration::from_secs(secs as u64)).await;
-            }
+    let order = visit_order(accounts.len(), settings.shuffle_checkin_order);
+    for (step, &i) in order.iter().enumerate() {
+        if let Some(secs) = gap_seconds(&settings, scheduled, step) {
+            tokio::time::sleep(std::time::Duration::from_secs(secs as u64)).await;
         }
         let _ = ensure_fresh_token(&mut accounts[i]).await;
         let rec = checkin::do_checkin(&accounts[i], &settings.default_base_url).await;
@@ -716,9 +768,14 @@ pub(crate) fn restart_workbuddy_process(app: &AppHandle) -> Result<(), String> {
 fn normalize_settings(mut settings: Settings) -> Result<Settings, String> {
     settings.schedule_time = accounts::normalize_time(&settings.schedule_time)
         .ok_or_else(|| "定时签到时刻格式应为 HH:MM（例如 09:07）".to_string())?;
+    settings.report_time = accounts::normalize_time(&settings.report_time)
+        .ok_or_else(|| "日报结算时刻格式应为 HH:MM（例如 12:00）".to_string())?;
     settings.notify_webhook = settings.notify_webhook.trim().to_string();
     // 风控间隔上限：钳制到合理区间，防手滑填 0（退化成无间隔）或填超大值
     settings.stagger_max_seconds = settings.stagger_max_seconds.clamp(2, 600);
+    settings.manual_stagger_max_seconds = settings.manual_stagger_max_seconds.clamp(2, 600);
+    // 定时签到的随机窗口：0 = 关闭随机，上限 12 小时（再宽就会把签到推到半夜）
+    settings.schedule_window_minutes = settings.schedule_window_minutes.min(720);
     // 扣费备选账号：去空格、去空项、去重，保持原有顺序（多选池；空 = 全部可用）
     let mut seen = std::collections::HashSet::new();
     settings.billing_account_ids = settings
@@ -900,26 +957,127 @@ pub fn clear_checkin_logs(app: AppHandle, account_id: Option<String>) -> Result<
     logs::clear_logs(&data_dir(&app), account_id.as_deref()).map_err(|e| e.to_string())
 }
 
+/// 结算一次积分日报：拉全部账号的资源视图 → 并进台账 → 写一条日报 → 推进基线。
+///
+/// 定时调度（`scheduler`）与手动命令**共用这一条路径**；两份实现必然漂移。
+///
+/// 窗口起点取「上次结算时刻」而不是「今天 00:00」：后者会把上次结算之后、
+/// 今天零点之前那段消耗整段漏掉，而且应用长时间没开时会漏得更多。
+pub(crate) async fn settle_report_inner(
+    app: &AppHandle,
+) -> Result<ledger::CreditReport, String> {
+    let dir = data_dir(app);
+    let accounts = accounts::load_accounts(&dir);
+    let mut led = ledger::load_ledger(&dir);
+    let now = chrono::Local::now();
+    let now_s = now.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // 逐账号拉资源视图，把逐包明细并进台账，同时记下结算时点的余额
+    let client = crate::http::api_client();
+    let mut balances: std::collections::BTreeMap<String, Option<f64>> =
+        std::collections::BTreeMap::new();
+    for (i, a) in accounts.iter().enumerate() {
+        if i > 0 {
+            crate::http::account_gap().await;
+        }
+        let host = account_host(a);
+        let view = checkin::fetch_resource_view(&client, &host, &a.token).await;
+        balances.insert(a.id.clone(), view.credits);
+        if !view.packages.is_empty() {
+            ledger::merge_account(
+                led.accts.entry(a.id.clone()).or_default(),
+                &view.packages,
+                &now_s,
+            );
+        }
+    }
+
+    // 本次结算自己也算一次采样
+    led.samples += 1;
+    let samples = led.samples;
+    // 首次结算没有基线：以「24 小时前」兜底，给一个合理的窗口起点
+    let from = led.baseline_at.clone().unwrap_or_else(|| {
+        (now - chrono::Duration::hours(24))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    });
+    let date = now.format("%Y-%m-%d").to_string();
+    let rep = ledger::settle(&mut led, &date, &from, &now_s, &accounts, &balances, samples);
+
+    // 先落盘日报、成功后才推进基线并归零采样计数：
+    // 万一写盘失败就直接返回错误，基线留在原处，下次结算还能把这段窗口补回来
+    ledger::append_report(&dir, rep.clone()).map_err(|e| e.to_string())?;
+    led.samples = 0;
+    let _ = ledger::save_ledger(&dir, &led);
+    Ok(rep)
+}
+
+/// 查询积分日报（新的在前）
+#[tauri::command]
+pub fn credit_reports(app: AppHandle) -> Result<Vec<ledger::CreditReport>, String> {
+    Ok(ledger::load_reports(&data_dir(&app)))
+}
+
+/// 清空日报历史（不影响积分台账与结算基线）
+#[tauri::command]
+pub fn credit_reports_clear(app: AppHandle) -> Result<(), String> {
+    ledger::clear_reports(&data_dir(&app)).map_err(|e| e.to_string())
+}
+
+/// 手动结算一次积分日报。
+///
+/// 会把基线推进到当前时刻，所以连点两次时第二条必然接近全 0 —— 这是对的
+/// （「自上次结算以来」本来就什么都没发生），不是 bug。
+#[tauri::command]
+pub async fn credit_report_settle(app: AppHandle) -> Result<ledger::CreditReport, String> {
+    settle_report_inner(&app).await
+}
+
 /// 当前应用版本（用于“关于/更新”展示）
 #[tauri::command]
 pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// 批量签到的风控间隔：返回某账号签到前应等待的秒数。
+/// 批量签到的访问顺序：返回「第 n 个被签到的账号」在列表里的下标。
 ///
-/// 未开启、或上限 < 2 时返回 None（不等待）。否则在 2..=max（秒）内取值——
-/// 用纳秒级时钟做轻量打散即可，这里不需要密码学强度，只要别让多账号
-/// 请求以固定节奏连发。
+/// `shuffle = false` 时就是顺序访问。打乱只作用于**请求次序**——调用方按它取账号，
+/// 但结果照旧写回原下标、按原顺序落盘与返回，所以界面列表不会跟着跳。
+fn visit_order(n: usize, shuffle: bool) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    if shuffle {
+        crate::rng::shuffle(&mut order);
+    }
+    order
+}
+
+/// 批量签到的「下一个账号之前等几秒」。返回 None = 不等。
+///
+/// - 第一个账号前永远不等（上来先等一段反而更像排队脚本）；
+/// - 定时/自动触发走 `stagger_checkin` + `stagger_max_seconds`（默认 2..=45s）；
+/// - 交互触发走 `manual_stagger` + `manual_stagger_max_seconds`（默认 2..=8s）。
+///
+/// 两档共用 [`stagger_seconds`]，只是上限不同：打散节奏靠的是「随机且非零」，
+/// 不是某个特定秒数。
+fn gap_seconds(settings: &Settings, scheduled: bool, step: usize) -> Option<u32> {
+    if step == 0 {
+        return None;
+    }
+    let (enabled, max) = if scheduled {
+        (settings.stagger_checkin, settings.stagger_max_seconds)
+    } else {
+        (settings.manual_stagger, settings.manual_stagger_max_seconds)
+    };
+    stagger_seconds(enabled, max)
+}
+
+/// 返回某账号签到前应等待的秒数：未开启、或上限 < 2 时返回 None（不等待），
+/// 否则在 2..=max（秒）内取值。
 fn stagger_seconds(enabled: bool, max: u32) -> Option<u32> {
     if !enabled || max < 2 {
         return None;
     }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs().wrapping_mul(2654435761))
-        .unwrap_or(0);
-    Some(2 + (nanos % (max as u64 - 1)) as u32)
+    Some(crate::rng::range(2, max as u64) as u32)
 }
 
 #[cfg(test)]
@@ -954,5 +1112,70 @@ mod tests {
             let s = stagger_seconds(true, 45).unwrap();
             assert!((2..=45).contains(&s), "间隔越界：{s}");
         }
+    }
+
+    #[test]
+    fn visit_order_covers_everyone_exactly_once() {
+        // 关掉打乱时必须原样顺序访问（老行为不能变）
+        assert_eq!(visit_order(4, false), vec![0, 1, 2, 3]);
+        assert!(visit_order(0, true).is_empty());
+        assert_eq!(visit_order(1, true), vec![0]);
+
+        // 打乱后仍是 0..n 的一个排列：不重不漏
+        let mut changed = false;
+        for _ in 0..200 {
+            let order = visit_order(8, true);
+            let mut sorted = order.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..8).collect::<Vec<usize>>(), "下标被弄丢了：{order:?}");
+            if order != (0..8).collect::<Vec<usize>>() {
+                changed = true;
+            }
+        }
+        assert!(changed, "200 次都没打乱顺序，说明打乱没生效");
+    }
+
+    #[test]
+    fn gap_seconds_uses_the_right_dial_and_never_waits_for_the_first() {
+        let mut s = Settings::default();
+        // 两档上限不同：自动 45s、手动 8s（默认值）
+        s.stagger_checkin = true;
+        s.stagger_max_seconds = 45;
+        s.manual_stagger = true;
+        s.manual_stagger_max_seconds = 8;
+
+        assert_eq!(gap_seconds(&s, true, 0), None, "第一个账号前不应等待");
+        assert_eq!(gap_seconds(&s, false, 0), None, "第一个账号前不应等待");
+        for _ in 0..50 {
+            let auto = gap_seconds(&s, true, 1).unwrap();
+            assert!((2..=45).contains(&auto), "自动档越界：{auto}");
+            let manual = gap_seconds(&s, false, 1).unwrap();
+            assert!((2..=8).contains(&manual), "手动档越界：{manual}");
+        }
+
+        // 各自关掉后互不影响
+        s.manual_stagger = false;
+        assert_eq!(gap_seconds(&s, false, 1), None);
+        assert!(gap_seconds(&s, true, 1).is_some());
+        s.stagger_checkin = false;
+        assert_eq!(gap_seconds(&s, true, 1), None);
+    }
+
+    #[test]
+    fn normalize_settings_clamps_the_guard_dials() {
+        // 手滑填 0 或天文数字都不该生效（0 会让间隔退化成「无间隔」）
+        let mut s = Settings::default();
+        s.stagger_max_seconds = 0;
+        s.manual_stagger_max_seconds = 9_999;
+        s.schedule_window_minutes = 100_000;
+        let n = normalize_settings(s).unwrap();
+        assert_eq!(n.stagger_max_seconds, 2);
+        assert_eq!(n.manual_stagger_max_seconds, 600);
+        assert_eq!(n.schedule_window_minutes, 720);
+
+        // 窗口 0 是**合法值**（= 精确到设定时刻，回到老行为），不能被当成非法输入拒掉
+        let mut s = Settings::default();
+        s.schedule_window_minutes = 0;
+        assert_eq!(normalize_settings(s).unwrap().schedule_window_minutes, 0);
     }
 }

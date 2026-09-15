@@ -1,4 +1,5 @@
 use crate::accounts::{Account, CheckinRecord, CreditSnapshot};
+use crate::ledger::PkgView;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use regex::Regex;
@@ -115,13 +116,13 @@ async fn post_checkin(
     url: &str,
     token: &str,
 ) -> Result<CheckinRecord, reqwest::Error> {
+    // header 一律由 http::api_client 统一提供（UA / Accept / x-client-platform），
+    // 这里不再手写——同一个模块里有的请求声明 web、有的不声明，本身就是识别点
     let resp = client
         .post(url)
         .bearer_auth(token)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body("{}")
-        .timeout(Duration::from_secs(20))
+        .json(&serde_json::json!({}))
+        .timeout(crate::http::TIMEOUT)
         .send()
         .await?;
 
@@ -312,62 +313,167 @@ async fn fetch_credits(client: &reqwest::Client, host: &str, token: &str) -> Opt
     fetch_credit_snapshot(client, host, token).await.credits
 }
 
-/// 一次拉取「剩余积分 + 最早积分过期时间」（同一份 `get-user-resource` 响应）。
-/// 失败时两者均为 None（credits 再退 `checkin-status` 兜底）。
-pub async fn fetch_credit_snapshot(
+/// 单个字段取值：优先 `*Precise`（接口给的是带小数的字符串），再退整数型字段。
+fn as_num(v: Option<&Value>) -> Option<f64> {
+    match v? {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn num_field(v: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|k| as_num(v.get(*k)))
+}
+
+/// `get-user-resource` 的一次完整读结果：汇总值 + 逐包明细。
+///
+/// 逐包明细是积分台账的输入（见 [`crate::ledger`]）：只有拿到每个包的**累计**授予
+/// 与累计已用，才能把「消耗」与「新增」分开算，并且天然覆盖多客户端同时消耗。
+#[derive(Default, Clone, Debug)]
+pub struct ResourceView {
+    /// 剩余积分合计（与 [`sum_credits`] 同口径）
+    pub credits: Option<f64>,
+    /// 还有余量的包里最早的重置/过期时间（毫秒）
+    pub earliest_expiry_ms: Option<i64>,
+    /// 逐包明细；响应里解析不到任何包时为空
+    pub packages: Vec<PkgView>,
+}
+
+/// 从 `get-user-resource` 响应里解析每个资源包的累计授予 / 累计已用。
+///
+/// **键必须用 `ResourceId`，不能用 `PackageCode`** —— 这是实测出来的：
+/// 同一批「CodeBuddy个人版国内运营裂变包」共用一个 `PackageCode`
+/// （`TCACA_code_007_nzdH5h4Nl0` 一次响应里对应 28 个彼此独立的包），
+/// 拿它当键会把这些包全部合并成一条，于是每天签到新发的那 100 积分
+/// 只有第一天能被算成「新增」，之后永远为 0。
+/// 实测 29 个包中 `ResourceId` 两两不同，`PackageCode + CycleStartTime` 也能区分；
+/// 这里前者优先、后者兜底，两者都没有就不记账（宁可漏，也不要错账）。
+fn parse_packages(body: &Value) -> Vec<PkgView> {
+    let Some(accounts) = resource_accounts(body) else {
+        return Vec::new();
+    };
+    accounts
+        .iter()
+        .filter_map(|a| {
+            let size = num_field(a, &["CapacitySizePrecise", "CapacitySize"])?;
+            // 缺 `used` 按 0 处理：刚发的包本来就还没被用过
+            let used = num_field(a, &["CapacityUsedPrecise", "CapacityUsed"]).unwrap_or(0.0);
+            let cycle_start = a
+                .get("CycleStartTime")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let resource = a
+                .get("ResourceId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let code = a
+                .get("PackageCode")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let key = if !resource.is_empty() {
+                resource.to_string()
+            } else if !code.is_empty() {
+                format!("{code}@{cycle_start}")
+            } else {
+                return None;
+            };
+            Some(PkgView {
+                key,
+                name: a
+                    .get("PackageName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                size,
+                used,
+                cycle_start,
+            })
+        })
+        .collect()
+}
+
+/// 一次拉取「剩余积分 + 最早过期时间 + 逐包明细」（同一份 `get-user-resource` 响应）。
+///
+/// 抽出来是为了让「刷新 / 签到 / 每日结算」三条路径**共用同一次请求**：
+/// 台账需要的逐包明细就附在同一份响应里，多解析几个字段而已，不额外打接口。
+///
+/// `checkin-status` 的兜底也收在这里 —— 只有一个地方定义「拿不到积分时怎么办」，
+/// 否则换了调用路径就会悄悄丢掉兜底（`refresh_all` 正是这么换过来的）。
+pub async fn fetch_resource_view(
     client: &reqwest::Client,
     host: &str,
     token: &str,
-) -> CreditSnapshot {
-    let mut snap = CreditSnapshot::default();
+) -> ResourceView {
     let Ok(resp) = client
         .post(format!("{}{}", host, RESOURCE_PATH))
         .bearer_auth(token)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("x-client-platform", "web")
         .json(&resource_body())
         .timeout(Duration::from_secs(15))
         .send()
         .await
     else {
-        return snap;
+        return ResourceView::default();
     };
     let Ok(body) = resp.json::<Value>().await else {
-        return snap;
+        return ResourceView::default();
     };
-    snap.credits = sum_credits(&body);
-    snap.earliest_expiry_ms = earliest_cycle_end(&body);
-    if snap.credits.is_none() {
+    let mut view = ResourceView {
+        credits: sum_credits(&body),
+        earliest_expiry_ms: earliest_cycle_end(&body),
+        packages: parse_packages(&body),
+    };
+    if view.credits.is_none() {
         // 兜底：checkin-status 的累计积分（没有过期时间概念）
         if let Ok(resp) = client
             .post(format!("{}{}", host, STATUS_PATH))
             .bearer_auth(token)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .body("{}")
+            .json(&serde_json::json!({}))
             .timeout(Duration::from_secs(15))
             .send()
             .await
         {
             if let Ok(body) = resp.json::<Value>().await {
-                snap.credits = body.get("data").and_then(extract_total_credits);
+                view.credits = body.get("data").and_then(extract_total_credits);
             }
         }
     }
-    snap.fetched_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
-    snap
+    view
+}
+
+/// 一次拉取「剩余积分 + 最早积分过期时间」（同一份 `get-user-resource` 响应）。
+/// 失败时两者均为 None（credits 再退 `checkin-status` 兜底，见 [`fetch_resource_view`]）。
+pub async fn fetch_credit_snapshot(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+) -> CreditSnapshot {
+    let view = fetch_resource_view(client, host, token).await;
+    CreditSnapshot {
+        credits: view.credits,
+        earliest_expiry_ms: view.earliest_expiry_ms,
+        fetched_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+    }
 }
 
 /// 对一个账号执行签到：遍历候选 host，命中明确结果即返回。
 pub async fn do_checkin(account: &Account, default_base: &str) -> CheckinRecord {
     let hosts = candidate_hosts(&account.token, account.base_url.as_deref(), default_base);
-    let client = reqwest::Client::new();
+    let client = crate::http::api_client();
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut last_unknown: Option<String> = None;
 
+    // 已尝试过的候选数：换候选之前让一拍。正常情况首个候选即命中，这个等待根本不会
+    // 发生；只有接口漂移、程序开始枚举 host × path 时才生效——「固定顺序 + 零间隔」的
+    // 端点枚举正是扫描器签名，而多试几次本身很正常
+    let mut probes = 0usize;
     for host in &hosts {
         for path in CHECKIN_PATHS {
+            if probes > 0 {
+                crate::http::probe_gap().await;
+            }
+            probes += 1;
             let url = format!("{}{}", host, path);
             match post_checkin(&client, &url, &account.token).await {
                 Ok(rec) if rec.success || rec.already || rec.inactive => {
@@ -419,22 +525,26 @@ pub async fn do_checkin(account: &Account, default_base: &str) -> CheckinRecord 
 /// （见 `do_checkin` / `classify`）。前端会把「今天真实点过签到」的结果优先于此。
 pub async fn query_checked_today(account: &Account, default_base: &str) -> Option<bool> {
     let hosts = candidate_hosts(&account.token, account.base_url.as_deref(), default_base);
-    let client = reqwest::Client::new();
+    let client = crate::http::api_client();
     // 候选路径按「最可能命中」排序；任一能解析出 today_checked_in 即返回，不必穷尽。
     let paths = [
         "/v2/billing/meter/checkin-activity-status",
         "/billing/meter/checkin-status",
         "/v2/billing/meter/checkin-status",
     ];
+    // 同 do_checkin：候选之间的间隔只为消灭「零间隔枚举」的形态，命中即停不受影响
+    let mut probes = 0usize;
     for host in &hosts {
         for path in paths {
+            if probes > 0 {
+                crate::http::probe_gap().await;
+            }
+            probes += 1;
             let url = format!("{}{}", host, path);
             let Ok(resp) = client
                 .post(&url)
                 .bearer_auth(&account.token)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .body("{}")
+                .json(&serde_json::json!({}))
                 .timeout(Duration::from_secs(10))
                 .send()
                 .await
@@ -552,6 +662,47 @@ mod tests {
         assert_eq!(extract_total_credits(&json!({})), None);
     }
 
+    /// 回归：同一批「运营裂变包」**共用一个 PackageCode**（实测 28 个包同码），
+    /// 逐包明细只能靠 `ResourceId` 区分。曾打算用 PackageCode 当键 —— 那样这些包会
+    /// 被合并成一条，每天签到新发的 100 积分只有第一天算得上「新增」，之后永远是 0。
+    #[test]
+    fn packages_are_keyed_by_resource_id_not_the_shared_package_code() {
+        let body = json!({"data": {"Response": {"Data": {"Accounts": [
+            {"PackageCode": "TCACA_code_007_x", "ResourceId": "r-1",
+             "PackageName": "国内运营裂变包", "CapacitySizePrecise": "100",
+             "CapacityUsedPrecise": "100", "CycleStartTime": "2026-08-20 15:04:14"},
+            {"PackageCode": "TCACA_code_007_x", "ResourceId": "r-2",
+             "PackageName": "国内运营裂变包", "CapacitySizePrecise": "100",
+             "CapacityUsedPrecise": "0", "CycleStartTime": "2026-08-21 09:30:09"}
+        ]}}}});
+        let pkgs = parse_packages(&body);
+        assert_eq!(pkgs.len(), 2, "同 PackageCode 的两个包必须各自成条：{pkgs:?}");
+        assert_ne!(pkgs[0].key, pkgs[1].key);
+        assert_eq!(pkgs[0].cycle_start, "2026-08-20 15:04:14");
+        assert_eq!((pkgs[0].size, pkgs[0].used), (100.0, 100.0));
+        assert_eq!(pkgs[0].name, "国内运营裂变包");
+    }
+
+    #[test]
+    fn package_parsing_survives_missing_or_coerced_fields() {
+        // 没有 ResourceId 时退化到 PackageCode + 周期起点
+        let fallback = json!({"data": {"accounts": [
+            {"PackageCode": "c", "CapacitySize": 50, "CycleStartTime": "d1"}
+        ]}});
+        let pkgs = parse_packages(&fallback);
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].key, "c@d1");
+        assert_eq!(pkgs[0].size, 50.0);
+        // 缺 used → 0（刚发的包还没被用过）
+        assert_eq!(pkgs[0].used, 0.0);
+        // 缺 size → 没有授予量可记，跳过该包
+        assert!(parse_packages(&json!({"data": {"accounts": [{"ResourceId": "r"}]}})).is_empty());
+        // 既无 ResourceId 也无 PackageCode → 不记账（宁可漏，不要错账）
+        assert!(parse_packages(&json!({"data": {"accounts": [{"CapacitySize": 1}]}})).is_empty());
+        // 完全没有 data 也不能 panic
+        assert!(parse_packages(&json!({"code": 0})).is_empty());
+    }
+
     #[test]
     fn earliest_expiry_ignores_empty_packages_and_picks_min() {
         let body = json!({"data": {"Response": {"Data": {"Accounts": [
@@ -592,7 +743,7 @@ mod tests {
             .host
             .clone()
             .unwrap_or_else(|| "https://www.workbuddy.cn".to_string());
-        let client = reqwest::Client::new();
+        let client = crate::http::api_client();
         let credits = fetch_credits(&client, &host, &a.token).await;
         println!("[{host}] 剩余积分={credits:?}");
         assert!(credits.is_some(), "应能解析出剩余积分");
