@@ -30,10 +30,24 @@
 //!   合计值会**掉下来**，日报立刻变成负数消耗。
 //! - **周期会重置**。同一 `PackageCode` 跨周期后 `CapacityUsed` 可能归零。
 //!
-//! 所以台账以 `PackageCode` 为键逐包记账，且每个包的数值**只取观测到的最大值**——
-//! 包过期后条目留在台账里（不再更新），合计因此永不回退；只有观测到「同一包、
-//! 周期起点变了、已用量真的变小了」时才把旧周期的量归档到 `rolled_used`，
-//! 既不让合计倒退，也不把重置后的用量重复计入。
+//! 所以台账以 `ResourceId` 为键逐包记账（**注意不是 `PackageCode`**，见 `PkgView::key`），
+//! 且每个包的数值**只取观测到的最大值**——包过期后条目留在台账里（不再更新），
+//! 合计因此永不回退；只有观测到「同一包、周期起点变了、已用量真的变小了」时
+//! 才把旧周期的量归档到 `rolled_used`，既不让合计倒退，也不把重置后的用量重复计入。
+//!
+//! # 「按天」与「每小时」是同一份数据的两种聚合
+//!
+//! 每个账号除了累计值，还维护一张**按小时的增量桶** `hours`，由每次采样时
+//! 「与上次采样相比涨了多少」累加而成。于是：
+//!
+//! - 小时桶 → 某天的合计 = Σ 该天 24 个桶
+//! - 相邻两天可直接相加（桶是「时刻 → 增量」的唯一归属，不重不漏）
+//!
+//! 关键设计：**增量在采样那一刻就落进「采样时刻所属的那个小时」，之后不再移动**。
+//! 这样「第 24 格把余额清零推进新一天」这件事根本不会发生 —— 不需要「封口」这一步，
+//! 也就没有「封口时机错了就丢数据」的风险。日期只是查询时的一个过滤条件。
+//!
+//! 代价是精度受采样密度限制（见 [`CreditReport::hours`] 的说明）。
 
 use crate::accounts::{set_private_permissions, Account};
 use serde::{Deserialize, Serialize};
@@ -43,6 +57,13 @@ use std::path::{Path, PathBuf};
 
 /// 保留的日报条数上限（约一年多），超出后丢弃最旧的
 const MAX_REPORTS: usize = 400;
+
+/// 小时桶保留天数。60 天 = 1440 个 (日期, 小时) 组合 / 账号，
+/// JSON 体积可忽略，但足够回看两个月里的任意一天。
+const KEEP_DAYS: i64 = 60;
+
+/// 日期 → 24 个增量桶（下标 = 小时）。只保留 `KEEP_DAYS` 天。
+pub type HourBuckets = BTreeMap<String, [f64; 24]>;
 
 /// 金额统一保留两位小数，与界面展示口径一致（接口给的是 `805.14000097` 这种精度）
 fn round2(v: f64) -> f64 {
@@ -89,6 +110,11 @@ pub struct AcctLedger {
     /// 已翻过周期的包的「旧周期已用量」归档：保住合计不倒退
     #[serde(default)]
     pub rolled_used: f64,
+    /// 已翻过周期的包的「旧周期授予量」归档：与 `pkgs` 里各包的 `size` 一起构成累计授予。
+    /// 周期重置时授予量不该重复计入「新增」，但**累计值的单调性**仍要保住 ——
+    /// 否则「授予量 × 已用比例」这类会回退的包，会在基线里留下一个填不平的坑（见 `merge_account`）。
+    #[serde(default)]
+    pub rolled_granted: f64,
     #[serde(default)]
     pub last_seen: String,
     /// 上次结算时点的累计（日报基线）
@@ -100,40 +126,72 @@ pub struct AcctLedger {
     /// 会把账号里已有的全部历史积分当成一天的新增/消耗报出来。
     #[serde(default)]
     pub seeded: bool,
+    /// 按小时的增量桶（消耗），键 = 日期 `YYYY-MM-DD`
+    #[serde(default)]
+    pub hours_used: HourBuckets,
+    /// 按小时的增量桶（授予）
+    #[serde(default)]
+    pub hours_granted: HourBuckets,
+    /// 上次采样时刻（本地时间串）。小时桶靠它算「这次比上次涨了多少」，
+    /// 因此**必须与 `last_seen`（只用于展示）分开**：任何写 `last_seen` 的地方
+    /// 都不能顺手改它，否则会把一段真实增量抹成 0。
+    #[serde(default)]
+    pub last_sample_at: String,
 }
 
 impl AcctLedger {
     /// 累计授予（台账口径，只增）
     pub fn granted(&self) -> f64 {
-        self.pkgs.values().map(|p| p.size).sum()
+        self.rolled_granted + self.pkgs.values().map(|p| p.size).sum::<f64>()
     }
     /// 累计已用（含已归档的旧周期用量，只增）
     pub fn used(&self) -> f64 {
         self.rolled_used + self.pkgs.values().map(|p| p.used).sum::<f64>()
     }
+
+    /// 删掉 `KEEP_DAYS` 天以前的桶，避免文件无限增长。
+    fn prune_hours(&mut self, today: chrono::NaiveDate) {
+        let cutoff = (today - chrono::Duration::days(KEEP_DAYS))
+            .format("%Y-%m-%d")
+            .to_string();
+        // 日期是 `YYYY-MM-DD`，字典序即时间序 —— 直接比字符串即可
+        self.hours_used.retain(|d, _| d.as_str() >= cutoff.as_str());
+        self.hours_granted.retain(|d, _| d.as_str() >= cutoff.as_str());
+    }
 }
 
-/// 全账号台账 + 结算基线
+/// 全账号台账。
+///
+/// 自然日口径下**不再需要结算基线**：某天的值就是那天 24 个小时桶之和，
+/// 与「什么时候点的结算」无关。因此连点两次「立即结算」得到的是同一条日报的刷新，
+/// 而不是一条接近全 0 的新日报。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Ledger {
     #[serde(default)]
     pub accts: BTreeMap<String, AcctLedger>,
-    /// 上次结算时点（本地时间串）：下一条日报的窗口起点
-    #[serde(default)]
-    pub baseline_at: Option<String>,
-    /// 累计采样次数（透明度：>1 说明窗口内不止 12 点那一刻采过）
-    #[serde(default)]
-    pub samples: u64,
 }
 
-/// 把一次观测合并进某个账号的台账。
+/// 把一次观测合并进某个账号的台账，并把「与上次采样相比的增量」累加进对应的小时桶。
+///
+/// `at` 是本次采样时刻（本地 `YYYY-MM-DD HH:MM:SS`）。
 ///
 /// 规则（每条都对应模块头里说的一个坑）：
 /// - 新包 → 直接入账（它的 `size` 就是这段时间的新增）
 /// - 已存在 → `size`/`used` 取观测最大值，包过期消失时条目留在台账里，合计不会倒退
-/// - 同一包换了周期 **且** `used` 真的回退了 → 旧周期的用量归档进 `rolled_used`
+/// - 同一包换了周期且 `used` 真的回退了 → 增量不能当负数记，改为把旧周期用量归档进
+///   `rolled_used` 并重设该包基线，使 `used()` 保持不降
+/// - 周期重置时授予量**不重复计入新增**（因此新周期授予量不作为增量记账），
+///   把差额归档进 `rolled_granted` 保住单调性
+/// - 小时桶只记**正增量**：负增量（周期重置、包过期）不是「消耗」，不能记进某一天
 pub fn merge_account(led: &mut AcctLedger, views: &[PkgView], at: &str) {
+    // 采样前先记下累计值：本次增量 = 合并之后 − 合并之前
+    let before = (led.granted(), led.used());
+    // 「本次是否有任何一个包被更新」。`views` 为空（账号一个包都没有 / 接口失败）
+    // 时**不能**记增量：那不是「没有变化」，只是「这一轮没读到」。
+    let mut touched = false;
+
     for v in views {
+        touched = true;
         match led.pkgs.get_mut(&v.key) {
             None => {
                 led.pkgs.insert(
@@ -149,13 +207,25 @@ pub fn merge_account(led: &mut AcctLedger, views: &[PkgView], at: &str) {
             }
             Some(e) => {
                 if e.cycle_start != v.cycle_start && v.used < e.used {
+                    // 翻了周期且已用量回退：把旧的观测值整体归档，然后**按最大值**并入新周期的观测。
+                    //
+                    // 这里不能「用新值覆盖旧值」：`size` 比 `used` 更常回退
+                    // （「授予量 × 已用比例」型的包每月都会把授予量重新算一遍，可以缩水），
+                    // 一旦 `granted()` 掉下去，而增量按 `max(0)` 记账，那个缺口就**永远补不回来** ——
+                    // 之后每次给这个包授予积分都会被缺口先吃掉，表现为「新增积分迟迟不显示」。
+                    // 取最大值则两个不变量同时成立：合计单调不降，且**任何真实增量都不被吞掉**
+                    //（`size` 因取 max 而不上浮，新增就完整地表现成增量）。
                     led.rolled_used += e.used;
+                    led.rolled_granted += e.size;
                     e.used = v.used;
-                } else if v.used > e.used {
-                    e.used = v.used;
-                }
-                if v.size > e.size {
                     e.size = v.size;
+                } else {
+                    if v.used > e.used {
+                        e.used = v.used;
+                    }
+                    if v.size > e.size {
+                        e.size = v.size;
+                    }
                 }
                 if v.name != e.name {
                     e.name = v.name.clone();
@@ -165,6 +235,7 @@ pub fn merge_account(led: &mut AcctLedger, views: &[PkgView], at: &str) {
             }
         }
     }
+
     if !led.seeded {
         // 首次采样：把基线对齐到刚刚入账的值，日报从「这两个时点之间」算起。
         // 不这么做的话，「开始统计」那一刻会把账号里已有的全部历史积分
@@ -172,20 +243,61 @@ pub fn merge_account(led: &mut AcctLedger, views: &[PkgView], at: &str) {
         led.base_granted = led.granted();
         led.base_used = led.used();
         led.seeded = true;
+        // 首采样只建基线，不产生任何桶（历史量不属于「今天」）
+        led.last_sample_at = at.to_string();
+    } else if !touched {
+        // 一个包都没读到（接口失败 / 账号空空）：累计值仍是「上次观测的最大值」，
+        // 不会被累加，所以既没有增量可记，也**不能推进采样时刻** ——
+        // 否则下一次真正读到时会凭空多出一段横跨整个空档的增量，
+        // 全部落进一个尴尬的小时里，看起来就像那个小时突然花掉一大笔。
+    } else if let Some((date, hour)) = parse_at(at) {
+        let (granted, used) = (led.granted(), led.used());
+        // `max(0)` 是防御：合并规则已保证累计不降，负增量只可能来自手改的 json
+        let d_used = (used - before.1).max(0.0);
+        let d_granted = (granted - before.0).max(0.0);
+        // 归入「本次采样时刻」所属的小时。跨过整点的那段增量会整块落进后一个小时 ——
+        // 采样越密越准，这正是「应用运行期间逐小时」的含义。
+        if d_used > 0.0 {
+            led.hours_used.entry(date.clone()).or_insert([0.0; 24])[hour] += d_used;
+        }
+        if d_granted > 0.0 {
+            led.hours_granted.entry(date.clone()).or_insert([0.0; 24])[hour] += d_granted;
+        }
+        led.prune_hours(
+            chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                .unwrap_or_else(|_| chrono::Local::now().date_naive()),
+        );
+        led.last_sample_at = at.to_string();
     }
+
+    // 注意：`last_sample_at` 只在上面各分支里推进，**不在这里兜底** ——
+    // 「空视图不推进」正是靠它不被无条件覆盖。（`last_seen` 只用于展示，随便更新。）
     led.last_seen = at.to_string();
 }
 
+/// 从 `YYYY-MM-DD HH:MM:SS` 里取出（日期, 小时）。格式不对则返回 None（不记账，
+/// 但不影响累计值 —— 宁可少一格明细，也不能写进错误的日期）。
+fn parse_at(at: &str) -> Option<(String, usize)> {
+    let (d, rest) = at.split_once(' ')?;
+    let hour: usize = rest.get(0..2)?.parse().ok()?;
+    if hour > 23 {
+        return None;
+    }
+    // 顺便校验日期段，避免把畸形串写进 hours 的键
+    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()?;
+    Some((d.to_string(), hour))
+}
+
 /// 日报里的一行（一个账号）
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct CreditReportAccount {
     pub account_id: String,
     pub name: String,
     #[serde(default)]
     pub phone: Option<String>,
-    /// 本窗口消耗（Σ CapacityUsed 增量）
+    /// 当天消耗（Σ 当天小时桶 · 消耗）
     pub consumed: f64,
-    /// 本窗口新增（Σ CapacitySize 增量）
+    /// 当天新增（Σ 当天小时桶 · 授予）
     pub gained: f64,
     /// 结算时点的剩余积分（口径与账号列表「剩余积分」一致）
     #[serde(default)]
@@ -193,42 +305,93 @@ pub struct CreditReportAccount {
     /// 结算时点仍在计量的资源包个数（便于判断「没数据」还是「真的 0」）
     #[serde(default)]
     pub packages: usize,
+    /// 该账号在这一天的 24 个消耗桶（下标 = 小时，未采样的小时为 0）
+    #[serde(default)]
+    pub hours_consumed: [f64; 24],
+    /// 该账号在这一天的 24 个新增桶
+    #[serde(default)]
+    pub hours_gained: [f64; 24],
 }
 
-/// 一条日报（每天一条，窗口 = 上次结算时点 → 本次结算时点）
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// 某一天里 24 个小时的合计（跨全部账号）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct HourTotal {
+    /// 小时（0–23）
+    pub hour: u8,
+    pub consumed: f64,
+    pub gained: f64,
+}
+
+/// 一条日报（每天一条，口径 = 自然日 00:00–24:00）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct CreditReport {
-    /// 结算日 `YYYY-MM-DD`（窗口结束那天，作为列表标题）
+    /// 结算日 `YYYY-MM-DD`（列表按它倒序）
     pub date: String,
-    /// 实际结算时刻
+    /// 该条日报的生成时刻（当天 12:00 或手动结算；即「今天的分界点」）
     pub generated_at: String,
-    /// 窗口起点（上次结算时刻；首次为结算时刻往前 24 小时）
+    /// 该条日报覆盖的窗口起点。新口径下固定为当天 `00:00:00`
+    #[serde(default)]
     pub window_from: String,
-    /// 窗口终点（本次结算时刻）
+    /// 窗口终点。当天为 `generated_at`（还没走完），封口后为次日 `00:00:00`
+    #[serde(default)]
     pub window_to: String,
+    /// 窗口是否已封闭（自然日已走完）
+    #[serde(default)]
+    pub sealed: bool,
+    /// `0` = 这一天的数据实测逐小时可用；`1` = 自然日口径上线时对当天做的补算，
+    /// 逐小时明细缺失（界面据此如实说明，不假装有小时数据）。
+    #[serde(default)]
+    pub granularity: u8,
     pub accounts: Vec<CreditReportAccount>,
     pub total_consumed: f64,
     pub total_gained: f64,
     /// 结算时点全部账号的剩余积分合计（全部取不到时为 None）
     #[serde(default)]
     pub total_balance: Option<f64>,
-    /// 窗口内的采样次数
+    /// 当天每小时合计（只列有数据的时点 —— 全列 24 行只会把界面灌满 0）
     #[serde(default)]
-    pub samples: u64,
+    pub hours: Vec<HourTotal>,
 }
 
-/// 结算：把「当前累计 − 上次结算时的累计」写成一条日报，并把基线推进到当前时点。
+/// 从一个账号的桶里取出某天的值（缺失返回全 0）
+fn day_buckets(buckets: &HourBuckets, date: &str) -> [f64; 24] {
+    buckets.get(date).copied().unwrap_or([0.0; 24])
+}
+
+/// 汇总某一天的 24 个小时（跨全部账号），只保留有数据的时点。
+fn hour_totals(accts: &BTreeMap<String, AcctLedger>, date: &str) -> Vec<HourTotal> {
+    let mut sum_used = [0.0f64; 24];
+    let mut sum_granted = [0.0f64; 24];
+    for a in accts.values() {
+        let hu = day_buckets(&a.hours_used, date);
+        let hg = day_buckets(&a.hours_granted, date);
+        for h in 0..24 {
+            sum_used[h] += hu[h];
+            sum_granted[h] += hg[h];
+        }
+    }
+    (0..24)
+        .filter(|&h| sum_used[h] > 0.0 || sum_granted[h] > 0.0)
+        .map(|h| HourTotal {
+            hour: h as u8,
+            consumed: round2(sum_used[h]),
+            gained: round2(sum_granted[h]),
+        })
+        .collect()
+}
+
+/// 生成一条日报。`date` 的 24 个小时桶已经在采样时归位，这里只做聚合 ——
+/// 因此**不需要任何「封口」动作**，也就不存在「封口时机没对上导致丢数据」的风险。
 ///
-/// 基线只在结算时推进，所以窗口内的高频采样（刷新 / 签到）只会让累计更准，
-/// 不会把窗口切成碎片。
-pub fn settle(
-    led: &mut Ledger,
-    date: &str,
-    window_from: &str,
-    window_to: &str,
+/// `sealed` 表示这个自然日是否已经走完（当天 12:00 结算时为 false）。
+pub fn build_report(
+    accts: &BTreeMap<String, AcctLedger>,
     accounts: &[Account],
     balances: &BTreeMap<String, Option<f64>>,
-    samples: u64,
+    date: &str,
+    generated_at: &str,
+    sealed: bool,
+    granularity: u8,
 ) -> CreditReport {
     let mut rows = Vec::with_capacity(accounts.len());
     let (mut total_consumed, mut total_gained) = (0.0f64, 0.0f64);
@@ -236,12 +399,12 @@ pub fn settle(
     let mut any_balance = false;
 
     for a in accounts {
-        let entry = led.accts.get(&a.id);
-        let (granted, used) = entry.map_or((0.0, 0.0), |e| (e.granted(), e.used()));
-        let (base_granted, base_used) = entry.map_or((0.0, 0.0), |e| (e.base_granted, e.base_used));
-        // 台账保证累计只增，这里再钳一次 0 纯粹是防御（例如用户手改过 json）
-        let consumed = (used - base_used).max(0.0);
-        let gained = (granted - base_granted).max(0.0);
+        let entry = accts.get(&a.id);
+        let empty = [0.0f64; 24];
+        let hours_consumed = entry.map_or(empty, |e| day_buckets(&e.hours_used, date));
+        let hours_gained = entry.map_or(empty, |e| day_buckets(&e.hours_granted, date));
+        let consumed = hours_consumed.iter().sum::<f64>();
+        let gained = hours_gained.iter().sum::<f64>();
         let balance = balances.get(&a.id).copied().flatten();
         if let Some(b) = balance {
             total_balance += b;
@@ -257,31 +420,93 @@ pub fn settle(
             gained: round2(gained),
             balance: balance.map(round2),
             packages: entry.map_or(0, |e| e.pkgs.len()),
+            hours_consumed: hours_consumed.map(round2),
+            hours_gained: hours_gained.map(round2),
         });
     }
 
-    // 推进基线：必须在算完所有差值之后，否则本轮就被抹成 0
-    for a in accounts {
-        let e = led.accts.entry(a.id.clone()).or_default();
-        if !e.seeded {
-            e.seeded = true;
-        }
-        e.base_granted = e.granted();
-        e.base_used = e.used();
-    }
-    led.baseline_at = Some(window_to.to_string());
+    // 明细按消耗从多到少排：看日报的第一诉求是「谁在花」，而不是「谁在最前面」
+    rows.sort_by(|a, b| {
+        b.consumed
+            .partial_cmp(&a.consumed)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.gained.partial_cmp(&a.gained).unwrap_or(std::cmp::Ordering::Equal))
+    });
 
     CreditReport {
         date: date.to_string(),
-        generated_at: window_to.to_string(),
-        window_from: window_from.to_string(),
-        window_to: window_to.to_string(),
+        generated_at: generated_at.to_string(),
+        window_from: format!("{date} 00:00:00"),
+        window_to: if sealed {
+            // 次日 00:00:00 —— 用日期加法而不是「加 24 小时」，避免夏令时把边界挪掉一小时
+            chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map(|d| format!("{} 00:00:00", d + chrono::Duration::days(1)))
+                .unwrap_or_else(|_| generated_at.to_string())
+        } else {
+            generated_at.to_string()
+        },
+        sealed,
+        granularity,
         accounts: rows,
         total_consumed: round2(total_consumed),
         total_gained: round2(total_gained),
         total_balance: any_balance.then(|| round2(total_balance)),
-        samples,
+        hours: hour_totals(accts, date),
     }
+}
+
+/// 把台账里比 `KEEP_DAYS` 旧的桶清掉。
+///
+/// `merge_account` 每次写入时已经会顺手剪一次，这里是给「长期没采样、刚打开应用」
+/// 的情况补一刀：否则首次采样前文件里可能还躺着几个月前的桶。
+pub fn prune_buckets(accts: &mut BTreeMap<String, AcctLedger>, today: chrono::NaiveDate) {
+    for a in accts.values_mut() {
+        a.prune_hours(today);
+    }
+}
+
+/// 供 `commands` 复用（`round2` 是私有助手）
+pub fn round2_public(v: f64) -> f64 {
+    round2(v)
+}
+
+/// 供 `commands` 复用（`save_reports` 是私有助手）
+pub fn save_reports_public(dir: &Path, reports: &[CreditReport]) -> std::io::Result<()> {
+    save_reports(dir, reports)
+}
+
+/// 旧口径 → 自然日口径的**一次性**迁移：把「旧口径下今天已累计、但还没有小时桶」
+/// 的那部分补进当天的 00 点桶。
+///
+/// 背景：自然日口径上线前，增量被记在「结算基线」里而不是小时桶里。升级那一刻，
+/// 当天已经发生的消耗/新增既不在任何桶里，也不该被丢掉 —— 所以就地问一次
+/// `(当前累计 − 旧基线)`，作为当天 00 点的量补上，返回补了多少供调用方标注
+/// `granularity = 1`。
+///
+/// **幂等**：补完立刻把旧基线推到当前值，因此同一天重复调用不会重复补；
+/// 一旦这天有了任何桶（说明已经在新口径下正常记账）就直接跳过。
+pub fn reconcile_day_baseline(e: &mut AcctLedger, date: &str) -> (f64, f64) {
+    if !e.seeded {
+        return (0.0, 0.0);
+    }
+    let has_today = e.hours_used.contains_key(date) || e.hours_granted.contains_key(date);
+    if has_today {
+        // 已有当天的桶：说明新口径已经在为这天记账，基线也早就对齐了
+        e.base_granted = e.granted();
+        e.base_used = e.used();
+        return (0.0, 0.0);
+    }
+    let d_used = (e.used() - e.base_used).max(0.0);
+    let d_granted = (e.granted() - e.base_granted).max(0.0);
+    if d_used > 0.0 {
+        e.hours_used.entry(date.to_string()).or_insert([0.0; 24])[0] += d_used;
+    }
+    if d_granted > 0.0 {
+        e.hours_granted.entry(date.to_string()).or_insert([0.0; 24])[0] += d_granted;
+    }
+    e.base_granted = e.granted();
+    e.base_used = e.used();
+    (d_used, d_granted)
 }
 
 // ── 落盘 ───────────────────────────────────────────────────────
@@ -318,23 +543,60 @@ pub fn save_ledger(dir: &Path, led: &Ledger) -> std::io::Result<()> {
     write_atomic(&ledger_file(dir), &serde_json::to_string_pretty(led)?)
 }
 
+/// 日报文件的包装：带 schema 版本。
+///
+/// 旧格式（无 `v` 字段）是「滑动窗口 + 结算基线」那一版，字段语义已变，不能混读 ——
+/// 所以加载时**直接丢弃**旧文件（`decode_reports` 里 `v` 缺失即返回空）。
+/// 丢掉的只是展示历史，不影响台账累计值（`credit_ledger.json` 另存），
+/// 而且刚开始统计时本来也没几条。
+#[derive(Serialize, Deserialize)]
+struct ReportsFile {
+    v: u32,
+    reports: Vec<CreditReport>,
+}
+
+/// 日报文件的 schema 版本（本版为 2）
+const REPORTS_SCHEMA: u32 = 2;
+
 /// 读日报：**新的在前**（界面直接顺序渲染）
 pub fn load_reports(dir: &Path) -> Vec<CreditReport> {
-    let f = reports_file(dir);
-    if !f.exists() {
+    decode_reports(&fs::read_to_string(reports_file(dir)).unwrap_or_default())
+}
+
+/// 解析日报文件。抽出来是为了能单测「旧格式被安全丢弃」这件事 ——
+/// 这类「读旧文件读到错数据」的 bug 只在真实升级路径上出现，手点很难覆盖。
+fn decode_reports(raw: &str) -> Vec<CreditReport> {
+    if raw.trim().is_empty() {
         return Vec::new();
     }
-    serde_json::from_str(&fs::read_to_string(&f).unwrap_or_default()).unwrap_or_default()
+    let Ok(f) = serde_json::from_str::<ReportsFile>(raw) else {
+        return Vec::new();
+    };
+    if f.v != REPORTS_SCHEMA {
+        return Vec::new();
+    }
+    f.reports
 }
 
 fn save_reports(dir: &Path, reports: &[CreditReport]) -> std::io::Result<()> {
-    write_atomic(&reports_file(dir), &serde_json::to_string_pretty(reports)?)
+    let f = ReportsFile {
+        v: REPORTS_SCHEMA,
+        reports: reports.to_vec(),
+    };
+    write_atomic(&reports_file(dir), &serde_json::to_string_pretty(&f)?)
 }
 
-/// 追加一条日报（新的在前）并裁剪长度
-pub fn append_report(dir: &Path, rep: CreditReport) -> std::io::Result<()> {
+/// 按 `date` 写入一条日报：同一天**覆盖**，不同天才新增。
+///
+/// 同一天被覆盖是刻意的：结算只是把当天已经落好的小时桶重新聚合一遍，
+/// 结果只会更全，绝不该在列表里存成两条同一天。
+pub fn upsert_report(dir: &Path, rep: CreditReport) -> std::io::Result<()> {
     let mut all = load_reports(dir);
-    all.insert(0, rep);
+    match all.iter().position(|r| r.date == rep.date) {
+        Some(i) => all[i] = rep,
+        None => all.insert(0, rep),
+    }
+    all.sort_by(|a, b| b.date.cmp(&a.date)); // 新的在前
     all.truncate(MAX_REPORTS);
     save_reports(dir, &all)
 }
@@ -353,11 +615,12 @@ pub fn report_message(rep: &CreditReport) -> String {
     if let Some(b) = rep.total_balance {
         s.push_str(&format!("｜剩余 {b:.2}"));
     }
-    s.push_str(&format!(
-        "\n窗口 {} → {}",
-        &rep.window_from[..16.min(rep.window_from.len())],
-        &rep.window_to[..16.min(rep.window_to.len())]
-    ));
+    // 当天还没走完时要讲清楚：这条是「到此刻为止」，不是全天
+    s.push_str(if rep.sealed {
+        "\n统计范围：全天 00:00–24:00"
+    } else {
+        "\n统计范围：今天 00:00 至此刻（当天尚未结束）"
+    });
     // 明细只列有变化的账号，避免推送被一串 0 刷屏
     let mut lines: Vec<String> = rep
         .accounts
@@ -366,7 +629,7 @@ pub fn report_message(rep: &CreditReport) -> String {
         .map(|a| format!("· {} 耗 {:.2} / 增 {:.2}", a.name, a.consumed, a.gained))
         .collect();
     if lines.is_empty() {
-        lines.push("· 窗口内没有账号产生消耗或新增".to_string());
+        lines.push("· 今天还没有账号产生消耗或新增".to_string());
     }
     s.push('\n');
     s.push_str(&lines.join("\n"));
@@ -404,111 +667,244 @@ mod tests {
         }
     }
 
+    /// 采样并顺手返回该账号的桶（绝大多数用例只关心桶，不关心累计值）
+    fn sample(led: &mut Ledger, id: &str, views: &[PkgView], at: &str) {
+        merge_account(led.accts.entry(id.into()).or_default(), views, at);
+    }
+
+    /// 只给某个账号建一次基线（首采样不产生桶）
+    fn seed(led: &mut Ledger, id: &str, views: &[PkgView], at: &str) {
+        sample(led, id, views, at);
+    }
+
+    // ── 累计值不倒退（原有不变量，必须继续成立）─────────────────────
+
     #[test]
     fn merge_keeps_maxima_so_an_expiring_package_never_rewinds_the_total() {
         let mut led = AcctLedger::default();
-        merge_account(&mut led, &[pkg("a", 100.0, 40.0, "d1")], "t1");
+        merge_account(&mut led, &[pkg("a", 100.0, 40.0, "d1")], "2026-09-15 10:00:00");
         assert_eq!((led.granted(), led.used()), (100.0, 40.0));
 
-        // 又消耗了一些
-        merge_account(&mut led, &[pkg("a", 100.0, 70.0, "d1")], "t2");
+        merge_account(&mut led, &[pkg("a", 100.0, 70.0, "d1")], "2026-09-15 11:00:00");
         assert_eq!(led.used(), 70.0);
 
         // 包过期、从响应里消失 —— 合计必须保持 70，不能掉回 0
-        merge_account(&mut led, &[], "t3");
+        merge_account(&mut led, &[], "2026-09-15 12:00:00");
         assert_eq!((led.granted(), led.used()), (100.0, 70.0));
     }
 
     #[test]
     fn cycle_rollover_archives_the_old_cycle_instead_of_rewinding() {
         let mut led = AcctLedger::default();
-        merge_account(&mut led, &[pkg("a", 500.0, 320.0, "9月")], "t1");
+        merge_account(&mut led, &[pkg("a", 500.0, 320.0, "9月")], "2026-09-30 10:00:00");
         // 翻到新周期：同一个月度包，已用量归零
-        merge_account(&mut led, &[pkg("a", 500.0, 0.0, "10月")], "t2");
+        merge_account(&mut led, &[pkg("a", 500.0, 0.0, "10月")], "2026-10-01 10:00:00");
         assert_eq!(led.used(), 320.0, "归零应被归档，合计不得倒退");
         // 新周期里再消耗 80 → 合计 400
-        merge_account(&mut led, &[pkg("a", 500.0, 80.0, "10月")], "t3");
+        merge_account(&mut led, &[pkg("a", 500.0, 80.0, "10月")], "2026-10-01 11:00:00");
         assert_eq!(led.used(), 400.0);
-        // 授予量只增：周期重置不重复计入「新增」
-        assert_eq!(led.granted(), 500.0);
+        // 授予量：归档的 500 + 新周期的 500。**周期重置后授予量确实又发了一次**，
+        // 所以这里不是 500 而是 1000 —— 它是「累计授予」这一计数器本身的语义。
+        // 「不重复计入新增」靠的是增量记账（旧周期没产生 500 的授予增量），
+        // 而不是靠把累计值压在 500。
+        assert_eq!(led.granted(), 1000.0);
     }
 
+    /// 回归：授予量会随周期回退的包（「授予量 × 已用比例」型）。
+    ///
+    /// 关键在于 `granted()` 必须**单调不降**：一旦它掉下去，而增量又按 `max(0)` 记账，
+    /// 那个缺口永远补不回来 —— 之后每次给这个包授予积分都会被缺口先吃掉一部分，
+    /// 表现为「新增积分要等好久才显示出来」。
+    /// 这条断言就是钉住这个坑。
     #[test]
-    fn first_sample_seeds_the_baseline_so_history_is_not_reported_as_one_day() {
-        // 账号里本来就躺着 100 授予 / 90 已用（历史用量）。第一次采样只负责建立基线，
-        // 不该把这 90 当成「窗口内消耗」报出来。
+    fn rollover_that_also_shrinks_the_grant_keeps_granted_monotonic() {
+        let mut led = AcctLedger::default();
+        merge_account(&mut led, &[pkg("m", 100.0, 90.0, "9月")], "2026-09-30 10:00:00");
+        assert_eq!(led.granted(), 100.0);
+
+        // 新周期：授予量缩到 50、已用归零 → 累计 = 归档 100 + 新周期 50
+        merge_account(&mut led, &[pkg("m", 50.0, 0.0, "10月")], "2026-10-01 10:00:00");
+        assert_eq!(led.granted(), 150.0, "授予量不得因周期重置而回退");
+        assert_eq!(led.used(), 90.0);
+
+        // 同一个周期内，观测值从 50 涨回 100：这就是真实发生的「又授予 50」。
+        // **必须报成 +50 的新增** —— 若此时还拿归档的 100 去取 max，
+        // 新增会被永久吞掉，用户看到的就是「发了积分但日报不动」。
+        merge_account(&mut led, &[pkg("m", 100.0, 0.0, "10月")], "2026-10-01 11:00:00");
+        assert_eq!(led.granted(), 200.0, "新周期内涨的量必须算进累计，不能被归档值盖住");
+    }
+
+    /// 与上一条相反的情形：新周期的授予量**更高**时，高出来的部分必须是「新增」。
+    ///
+    /// 这条是防「归档值赖着不走」：若翻周期时把旧观测留在 `e.size` 里取 max，
+    /// 它会在新周期的每次采样里都盖住真实值，等于**永久吞掉该包后续的全部新增**
+    /// ——用户在界面上会看到「签到发了积分但日报一直是 0」。
+    /// 归档 + 用新观测替换，才能让两个不变量同时成立。
+    #[test]
+    fn rollover_that_raises_the_grant_reports_the_increase_as_gained() {
+        let mut led = AcctLedger::default();
+        merge_account(&mut led, &[pkg("m", 100.0, 90.0, "9月")], "2026-09-30 10:00:00");
+
+        // 新周期授予量升到 120：累计 = 归档 100 + 新周期 120 = 220
+        merge_account(&mut led, &[pkg("m", 120.0, 0.0, "10月")], "2026-10-01 10:00:00");
+        assert_eq!(led.granted(), 220.0);
+        assert_eq!(led.used(), 90.0, "已用量归零要归档，不能倒退");
+    }
+
+    // ── 小时桶 ────────────────────────────────────────────────
+
+    #[test]
+    fn first_sample_only_seeds_the_baseline_and_writes_no_bucket() {
+        // 账号里本来就躺着 100 授予 / 90 已用（历史用量）。
+        // 第一次采样只建立基线：不产生任何小时桶，否则历史量会被算成「今天的消耗」。
         let mut led = Ledger::default();
-        merge_account(
-            led.accts.entry("a1".into()).or_default(),
-            &[pkg("a", 100.0, 90.0, "d1")],
-            "t1",
-        );
-        assert!(led.accts["a1"].seeded);
-        assert_eq!(
-            (led.accts["a1"].base_granted, led.accts["a1"].base_used),
-            (100.0, 90.0)
-        );
+        seed(&mut led, "a1", &[pkg("a", 100.0, 90.0, "d1")], "2026-09-15 09:30:00");
+        let a = &led.accts["a1"];
+        assert!(a.seeded);
+        assert!(a.hours_used.is_empty(), "首采样不该写桶");
+        assert!(a.hours_granted.is_empty());
 
-        let a1 = account("a1", "甲");
-        let rep = settle(
-            &mut led,
-            "2026-09-15",
-            "2026-09-14 12:00:00",
-            "2026-09-15 12:00:00",
-            std::slice::from_ref(&a1),
-            &BTreeMap::new(),
-            1,
-        );
-        assert_eq!(
-            (rep.total_consumed, rep.total_gained),
-            (0.0, 0.0),
-            "首次结算不该把历史用量算进来"
-        );
-
-        // 此后真的又消耗了 10 → 只报这 10
-        merge_account(
-            led.accts.entry("a1".into()).or_default(),
-            &[pkg("a", 100.0, 100.0, "d1")],
-            "t2",
-        );
-        let rep2 = settle(
-            &mut led,
-            "2026-09-16",
-            "2026-09-15 12:00:00",
-            "2026-09-16 12:00:00",
-            &[a1],
-            &BTreeMap::new(),
-            2,
-        );
-        assert_eq!((rep2.total_consumed, rep2.total_gained), (10.0, 0.0));
+        // 此后真的又消耗 10 → 只报这 10
+        sample(&mut led, "a1", &[pkg("a", 100.0, 100.0, "d1")], "2026-09-15 09:45:00");
+        assert_eq!(day_buckets(&led.accts["a1"].hours_used, "2026-09-15")[9], 10.0);
     }
 
     #[test]
-    fn settle_reports_per_account_and_total_deltas_then_advances_the_baseline() {
+    fn increments_land_in_the_hour_of_the_sample_that_observed_them() {
+        let mut led = Ledger::default();
+        seed(&mut led, "a1", &[pkg("p", 1000.0, 0.0, "d")], "2026-09-15 08:00:00");
+
+        // 08 点这一段 +30
+        sample(&mut led, "a1", &[pkg("p", 1000.0, 30.0, "d")], "2026-09-15 08:59:00");
+        // 跨过整点后的一次采样：整段 +20 归入 09 点
+        sample(&mut led, "a1", &[pkg("p", 1000.0, 50.0, "d")], "2026-09-15 09:01:00");
+        // 11 点（10 点整点之前那段没有采样，不产生桶）
+        sample(&mut led, "a1", &[pkg("p", 1000.0, 80.0, "d")], "2026-09-15 11:30:00");
+
+        let hu = day_buckets(&led.accts["a1"].hours_used, "2026-09-15");
+        assert_eq!(hu[8], 30.0);
+        assert_eq!(hu[9], 20.0);
+        assert_eq!(hu[10], 0.0, "没有采样的时段不该凭空有值");
+        assert_eq!(hu[11], 30.0);
+        // 桶之和 = 当天累计增量
+        assert_eq!(hu.iter().sum::<f64>(), 80.0);
+    }
+
+    #[test]
+    fn a_sample_landing_in_the_next_day_opens_that_day_bucket() {
+        // 跨天采样：增量整块记进「采样时刻」那一天，前一天的桶不受影响 ——
+        // 这正是「不需要封口动作」的原因。
+        let mut led = Ledger::default();
+        seed(&mut led, "a1", &[pkg("p", 100.0, 0.0, "d")], "2026-09-15 23:00:00");
+        sample(&mut led, "a1", &[pkg("p", 100.0, 70.0, "d")], "2026-09-15 23:50:00");
+        sample(&mut led, "a1", &[pkg("p", 100.0, 90.0, "d")], "2026-09-16 00:10:00");
+
+        let a = &led.accts["a1"];
+        assert_eq!(day_buckets(&a.hours_used, "2026-09-15")[23], 70.0);
+        assert_eq!(day_buckets(&a.hours_used, "2026-09-16")[0], 20.0);
+        // 两天相加 = 累计增量，不重不漏
+        let total: f64 = a.hours_used.values().flatten().sum();
+        assert_eq!(total, 90.0);
+    }
+
+    #[test]
+    fn an_empty_view_does_not_create_a_delta_or_move_the_sample_clock() {
+        // 接口失败 / 账号一个包都没有时 `views` 为空。这**不是**「没有变化」，
+        // 只是这一轮没读到 —— 累计值仍是上次的最大值，所以不该产生增量，
+        // 采样时刻也不能动，否则下次真读到时会凭空多出一段横跨空档的增量。
+        let mut led = Ledger::default();
+        seed(&mut led, "a1", &[pkg("p", 100.0, 0.0, "d")], "2026-09-15 09:00:00");
+        sample(&mut led, "a1", &[pkg("p", 100.0, 40.0, "d")], "2026-09-15 10:00:00");
+
+        sample(&mut led, "a1", &[], "2026-09-15 11:00:00");
+        let a = &led.accts["a1"];
+        assert!(a.hours_used.is_empty() || day_buckets(&a.hours_used, "2026-09-15")[11] == 0.0);
+        assert_eq!(
+            a.last_sample_at, "2026-09-15 10:00:00",
+            "空视图不该推进采样时刻"
+        );
+    }
+
+    #[test]
+    fn negative_movement_is_never_recorded_as_a_bucket() {
+        // 包过期消失 / 周期重置都不是「消耗」，不能写成负数把某天的量冲掉
+        let mut led = Ledger::default();
+        seed(&mut led, "a1", &[pkg("p", 500.0, 300.0, "9月")], "2026-09-30 10:00:00");
+        sample(&mut led, "a1", &[pkg("p", 500.0, 0.0, "10月")], "2026-10-01 09:00:00");
+        assert!(
+            day_buckets(&led.accts["a1"].hours_used, "2026-10-01").iter().all(|v| *v == 0.0),
+            "周期重置不产生桶"
+        );
+        assert_eq!(led.accts["a1"].used(), 300.0, "但累计值保住了");
+    }
+
+    #[test]
+    fn a_malformed_timestamp_is_skipped_without_corrupting_the_bucket_map() {
+        let mut led = Ledger::default();
+        seed(&mut led, "a1", &[pkg("p", 100.0, 0.0, "d")], "2026-09-15 10:00:00");
+        sample(&mut led, "a1", &[pkg("p", 100.0, 40.0, "d")], "坏时刻");
+        let a = &led.accts["a1"];
+        assert!(a.hours_used.is_empty(), "畸形时刻不记账，也不能写进错误的日期");
+        assert_eq!(a.used(), 40.0, "累计值照常更新");
+    }
+
+    #[test]
+    fn buckets_are_pruned_but_recent_days_stay() {
+        let mut led = Ledger::default();
+        seed(&mut led, "a1", &[pkg("p", 1000.0, 0.0, "d")], "2026-01-01 00:00:00");
+        // 造两个桶：一个远超出保留期、一个就在「今天」。
+        // 注意第一次 sample 时 2026-01-02 就已经超期了（远离 03-20），会被当场剪掉 ——
+        // 剪枝是在**每次写入时**做的，不是只在读的时候。
+        sample(&mut led, "a1", &[pkg("p", 1000.0, 10.0, "d")], "2026-01-02 05:00:00");
+        sample(&mut led, "a1", &[pkg("p", 1000.0, 20.0, "d")], "2026-03-20 05:00:00");
+        assert_eq!(led.accts["a1"].hours_used.len(), 1, "超期桶当场被剪掉");
+        assert!(led.accts["a1"].hours_used.contains_key("2026-03-20"));
+
+        // 保留期**之内**的旧天不该被剪掉
+        let mut led2 = Ledger::default();
+        seed(&mut led2, "a1", &[pkg("p", 1000.0, 0.0, "d")], "2026-03-19 00:00:00");
+        sample(&mut led2, "a1", &[pkg("p", 1000.0, 10.0, "d")], "2026-03-19 05:00:00");
+        sample(&mut led2, "a1", &[pkg("p", 1000.0, 20.0, "d")], "2026-03-20 05:00:00");
+        assert_eq!(led2.accts["a1"].hours_used.len(), 2, "昨天的桶必须留着");
+
+        // 显式剪枝到某天：比保留期旧的清掉，近期的留下
+        let today = chrono::NaiveDate::parse_from_str("2026-06-01", "%Y-%m-%d").unwrap();
+        prune_buckets(&mut led2.accts, today);
+        assert!(led2.accts["a1"].hours_used.is_empty(), "3 月的桶在 6 月该清掉");
+    }
+
+    // ── 按天聚合 ──────────────────────────────────────────────
+
+    #[test]
+    fn report_totals_are_the_sum_of_that_days_buckets() {
         let mut led = Ledger::default();
         let a1 = account("a1", "甲");
         let a2 = account("a2", "乙");
+        seed(&mut led, "a1", &[pkg("p1", 100.0, 0.0, "d")], "2026-09-15 08:00:00");
+        seed(&mut led, "a2", &[pkg("p2", 200.0, 0.0, "d")], "2026-09-15 08:00:00");
 
-        // 第一次采样：建立基线（不计入任何窗口）
-        merge_account(led.accts.entry("a1".into()).or_default(), &[pkg("p1", 100.0, 10.0, "d1")], "t0");
-        merge_account(led.accts.entry("a2".into()).or_default(), &[pkg("p2", 200.0, 5.0, "d1")], "t0");
-
-        // 窗口内：甲消耗 30、签到又得一个新包 100；乙消耗 50
-        merge_account(led.accts.entry("a1".into()).or_default(), &[pkg("p1", 100.0, 40.0, "d1")], "t1");
-        merge_account(led.accts.entry("a1".into()).or_default(), &[pkg("p1", 100.0, 40.0, "d1"), pkg("p1b", 100.0, 0.0, "d2")], "t1");
-        merge_account(led.accts.entry("a2".into()).or_default(), &[pkg("p2", 200.0, 55.0, "d1")], "t1");
+        // 甲：消耗 30 又拿到新包 100；乙：消耗 50
+        sample(&mut led, "a1", &[pkg("p1", 100.0, 30.0, "d")], "2026-09-15 09:00:00");
+        sample(
+            &mut led,
+            "a1",
+            &[pkg("p1", 100.0, 30.0, "d"), pkg("p1b", 100.0, 0.0, "d2")],
+            "2026-09-15 10:00:00",
+        );
+        sample(&mut led, "a2", &[pkg("p2", 200.0, 50.0, "d")], "2026-09-15 11:00:00");
 
         let mut balances = BTreeMap::new();
         balances.insert("a1".to_string(), Some(170.0));
         balances.insert("a2".to_string(), Some(145.0));
-        let rep = settle(
-            &mut led,
-            "2026-09-15",
-            "2026-09-14 12:00:00",
-            "2026-09-15 12:00:00",
+
+        let rep = build_report(
+            &led.accts,
             &[a1, a2],
             &balances,
-            4,
+            "2026-09-15",
+            "2026-09-15 12:00:00",
+            false,
+            0,
         );
 
         let row = |id: &str| rep.accounts.iter().find(|r| r.account_id == id).unwrap().clone();
@@ -517,53 +913,121 @@ mod tests {
         assert_eq!((rep.total_consumed, rep.total_gained), (80.0, 100.0));
         assert_eq!(rep.total_balance, Some(315.0));
         assert_eq!(row("a1").packages, 2);
+        // 窗口按自然日固定
+        assert_eq!(rep.window_from, "2026-09-15 00:00:00");
+        assert!(!rep.sealed);
+        assert_eq!(rep.window_to, "2026-09-15 12:00:00", "当天未封闭，终点=结算时刻");
+    }
 
-        // 基线已推进：立刻再结算一次必须是全 0（否则会重复计数）
-        let again = settle(
-            &mut led,
+    #[test]
+    fn a_sealed_day_spans_the_full_calendar_day() {
+        let led = Ledger::default();
+        let rep = build_report(
+            &led.accts,
+            &[account("a1", "甲")],
+            &BTreeMap::new(),
             "2026-09-15",
-            "2026-09-15 12:00:00",
-            "2026-09-15 12:00:01",
+            "2026-09-16 00:05:00",
+            true,
+            0,
+        );
+        assert_eq!(rep.window_from, "2026-09-15 00:00:00");
+        assert_eq!(rep.window_to, "2026-09-16 00:00:00");
+        assert!(rep.sealed);
+    }
+
+    #[test]
+    fn hour_totals_aggregate_accounts_and_skip_empty_hours() {
+        let mut led = Ledger::default();
+        seed(&mut led, "a1", &[pkg("p1", 1000.0, 0.0, "d")], "2026-09-15 08:00:00");
+        seed(&mut led, "a2", &[pkg("p2", 1000.0, 0.0, "d")], "2026-09-15 08:00:00");
+        sample(&mut led, "a1", &[pkg("p1", 1000.0, 12.0, "d")], "2026-09-15 09:00:00");
+        sample(&mut led, "a2", &[pkg("p2", 1000.0, 8.0, "d")], "2026-09-15 09:30:00");
+        sample(&mut led, "a1", &[pkg("p1", 1000.0, 20.0, "d")], "2026-09-15 14:00:00");
+
+        let rep = build_report(
+            &led.accts,
             &[account("a1", "甲"), account("a2", "乙")],
             &BTreeMap::new(),
-            5,
+            "2026-09-15",
+            "2026-09-15 15:00:00",
+            false,
+            0,
         );
-        assert_eq!((again.total_consumed, again.total_gained), (0.0, 0.0));
-        assert_eq!(led.baseline_at.as_deref(), Some("2026-09-15 12:00:01"));
+
+        let hours: Vec<(u8, f64)> = rep.hours.iter().map(|h| (h.hour, h.consumed)).collect();
+        assert_eq!(
+            hours,
+            vec![(9, 20.0), (14, 8.0)],
+            "两个账号 9 点合起来 20，14 点 8；空小时不入列表"
+        );
+        // 小时合计必须与当天合计一致（同一份桶的两种聚合）
+        let sum: f64 = rep.hours.iter().map(|h| h.consumed).sum();
+        assert_eq!(round2(sum), rep.total_consumed);
+    }
+
+    #[test]
+    fn accounts_are_sorted_by_consumption_desc() {
+        let mut led = Ledger::default();
+        seed(&mut led, "small", &[pkg("p", 100.0, 0.0, "d")], "2026-09-15 08:00:00");
+        seed(&mut led, "big", &[pkg("q", 900.0, 0.0, "d")], "2026-09-15 08:00:00");
+        sample(&mut led, "small", &[pkg("p", 100.0, 5.0, "d")], "2026-09-15 09:00:00");
+        sample(&mut led, "big", &[pkg("q", 900.0, 500.0, "d")], "2026-09-15 09:00:00");
+
+        let rep = build_report(
+            &led.accts,
+            &[account("small", "小"), account("big", "大")],
+            &BTreeMap::new(),
+            "2026-09-15",
+            "2026-09-15 12:00:00",
+            false,
+            0,
+        );
+        assert_eq!(rep.accounts[0].account_id, "big", "消耗多的排前面");
     }
 
     #[test]
     fn no_balance_reading_yields_none_instead_of_a_misleading_zero() {
-        let mut led = Ledger::default();
-        let a1 = account("a1", "甲");
-        merge_account(led.accts.entry("a1".into()).or_default(), &[pkg("p", 10.0, 0.0, "d")], "t");
-        let rep = settle(&mut led, "d", "f", "t", &[a1], &BTreeMap::new(), 1);
+        let led = Ledger::default();
+        let rep = build_report(
+            &led.accts,
+            &[account("a1", "甲")],
+            &BTreeMap::new(),
+            "d",
+            "t",
+            false,
+            0,
+        );
         assert_eq!(rep.total_balance, None);
         assert_eq!(rep.accounts[0].balance, None);
     }
 
+    // ── 落盘 ─────────────────────────────────────────────────
+
     #[test]
-    fn reports_are_newest_first_and_capped() {
+    fn upsert_replaces_the_same_day_and_keeps_newest_first() {
         let dir = std::env::temp_dir().join(format!("wba-ledger-{}", uuid::Uuid::new_v4()));
-        let mk = |d: &str| CreditReport {
+        let mk = |d: &str, consumed: f64| CreditReport {
             date: d.into(),
-            generated_at: d.into(),
-            window_from: String::new(),
-            window_to: String::new(),
-            accounts: vec![],
-            total_consumed: 0.0,
-            total_gained: 0.0,
-            total_balance: None,
-            samples: 0,
+            total_consumed: consumed,
+            ..Default::default()
         };
-        append_report(&dir, mk("2026-09-14")).unwrap();
-        append_report(&dir, mk("2026-09-15")).unwrap();
+
+        upsert_report(&dir, mk("2026-09-15", 10.0)).unwrap();
+        upsert_report(&dir, mk("2026-09-14", 5.0)).unwrap();
         let all = load_reports(&dir);
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].date, "2026-09-15", "最新的必须排在最前");
 
+        // 同一天再写一次：覆盖而不是追加（结算只是重新聚合当天）
+        upsert_report(&dir, mk("2026-09-15", 42.0)).unwrap();
+        let all = load_reports(&dir);
+        assert_eq!(all.len(), 2, "同一天不该出现两条");
+        assert_eq!(all[0].total_consumed, 42.0);
+        assert_eq!(all[0].date, "2026-09-15");
+
         for i in 0..MAX_REPORTS + 5 {
-            append_report(&dir, mk(&format!("2026-01-{i:02}"))).unwrap();
+            upsert_report(&dir, mk(&format!("2026-01-{i:02}"), 1.0)).unwrap();
         }
         assert_eq!(load_reports(&dir).len(), MAX_REPORTS);
 
@@ -572,16 +1036,41 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// 旧格式（无 schema 版本）必须被安全丢弃：它的 `total_consumed` 是「上次结算以来」的
+    /// 滑动窗口口径，混进新的自然日列表会让人以为某天消耗异常大。
+    #[test]
+    fn reports_written_in_the_old_schema_are_discarded_on_load() {
+        let legacy = r#"[
+          {"date":"2026-09-14","generated_at":"2026-09-14 12:00:00",
+           "window_from":"2026-09-13 12:00:00","window_to":"2026-09-14 12:00:00",
+           "accounts":[],"total_consumed":999.0,"total_gained":0.0,"samples":3}
+        ]"#;
+        assert!(decode_reports(legacy).is_empty(), "旧格式应被丢弃");
+        assert!(decode_reports("").is_empty());
+        assert!(decode_reports("{ 不是 json").is_empty());
+
+        // 新格式则正常读回
+        let rep = CreditReport {
+            date: "2026-09-15".into(),
+            total_consumed: 7.0,
+            ..Default::default()
+        };
+        let fresh = serde_json::to_string(&ReportsFile {
+            v: REPORTS_SCHEMA,
+            reports: vec![rep],
+        })
+        .unwrap();
+        assert_eq!(decode_reports(&fresh).len(), 1);
+    }
+
     #[test]
     fn ledger_round_trips_and_tolerates_a_missing_file() {
         let dir = std::env::temp_dir().join(format!("wba-ledger-{}", uuid::Uuid::new_v4()));
         assert!(load_ledger(&dir).accts.is_empty(), "文件不存在时应是空台账");
         let mut led = Ledger::default();
         merge_account(led.accts.entry("a1".into()).or_default(), &[pkg("p", 5.0, 1.0, "d")], "t");
-        led.samples = 7;
         save_ledger(&dir, &led).unwrap();
         let back = load_ledger(&dir);
-        assert_eq!(back.samples, 7);
         assert_eq!(back.accts["a1"].used(), 1.0);
         assert!(back.accts["a1"].seeded);
         let _ = fs::remove_dir_all(&dir);
@@ -592,37 +1081,45 @@ mod tests {
         let rep = CreditReport {
             date: "2026-09-15".into(),
             generated_at: "2026-09-15 12:00:00".into(),
-            window_from: "2026-09-14 12:00:00".into(),
+            window_from: "2026-09-15 00:00:00".into(),
             window_to: "2026-09-15 12:00:00".into(),
             accounts: vec![
                 CreditReportAccount {
                     account_id: "a".into(),
                     name: "甲".into(),
-                    phone: None,
                     consumed: 12.5,
                     gained: 100.0,
                     balance: Some(1.0),
                     packages: 1,
+                    ..Default::default()
                 },
                 CreditReportAccount {
                     account_id: "b".into(),
                     name: "乙".into(),
-                    phone: None,
                     consumed: 0.0,
                     gained: 0.0,
                     balance: Some(1.0),
                     packages: 1,
+                    ..Default::default()
                 },
             ],
             total_consumed: 12.5,
             total_gained: 100.0,
             total_balance: Some(2.0),
-            samples: 2,
+            ..Default::default()
         };
         let m = report_message(&rep);
         assert!(m.contains("消耗 12.50"));
         assert!(m.contains("新增 100.00"));
         assert!(m.contains("甲 耗 12.50 / 增 100.00"));
+        assert!(m.contains("今天 00:00 至此刻"), "当天未结束时文案要说清范围");
         assert!(!m.contains("乙"), "没有变化的账号不该出现在明细里：{m}");
+
+        // 封口后的文案换成全天
+        let sealed = CreditReport {
+            sealed: true,
+            ..rep.clone()
+        };
+        assert!(report_message(&sealed).contains("全天 00:00–24:00"));
     }
 }

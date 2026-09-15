@@ -570,7 +570,6 @@ pub async fn refresh_all(app: AppHandle) -> Result<Vec<Account>, String> {
         let checked = checkin::query_checked_today(&accounts[i], &settings.default_base_url).await;
         accounts[i].checked_today = checked;
     }
-    led.samples += 1;
     // 台账落盘失败不影响刷新结果（它只是统计，丢了下次采样会重新累积）
     let _ = ledger::save_ledger(&dir, &led);
     let cloned = accounts.clone();
@@ -957,12 +956,18 @@ pub fn clear_checkin_logs(app: AppHandle, account_id: Option<String>) -> Result<
     logs::clear_logs(&data_dir(&app), account_id.as_deref()).map_err(|e| e.to_string())
 }
 
-/// 结算一次积分日报：拉全部账号的资源视图 → 并进台账 → 写一条日报 → 推进基线。
+/// 结算一次积分日报：拉全部账号的资源视图 → 并进台账 → 聚合出**当天**的日报 → 落盘。
 ///
 /// 定时调度（`scheduler`）与手动命令**共用这一条路径**；两份实现必然漂移。
 ///
-/// 窗口起点取「上次结算时刻」而不是「今天 00:00」：后者会把上次结算之后、
-/// 今天零点之前那段消耗整段漏掉，而且应用长时间没开时会漏得更多。
+/// 口径是**自然日 00:00–24:00**：某天的值 = 那天 24 个小时桶之和，而桶在每次采样时
+/// 就已按「采样时刻所属的小时」归位。因此这里**不做任何封口动作**，也不再有结算基线 ——
+/// 当天 12:00 结算得到的是「到今天此刻」，次日结算同一天时自动补齐成全天。
+///
+/// 唯一需要照顾历史的是 `granularity`：自然日口径上线时，当天在旧口径下已经
+/// 累计过一段（旧口径把增量记在“结算基线”里，没有小时桶）。这一段的归属无法还原，
+/// 所以**归到这一天**并在日报上标注 `granularity = 1`，避免它凭空消失 ——
+/// 宁可让当天数字偏大且被如实标注，也不要让用户看到自己刚花掉的积分不见了。
 pub(crate) async fn settle_report_inner(
     app: &AppHandle,
 ) -> Result<ledger::CreditReport, String> {
@@ -971,8 +976,9 @@ pub(crate) async fn settle_report_inner(
     let mut led = ledger::load_ledger(&dir);
     let now = chrono::Local::now();
     let now_s = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let date = now.format("%Y-%m-%d").to_string();
 
-    // 逐账号拉资源视图，把逐包明细并进台账，同时记下结算时点的余额
+    // 逐账号拉资源视图，把逐包明细并进台账（顺带写小时桶），同时记下结算时点的余额
     let client = crate::http::api_client();
     let mut balances: std::collections::BTreeMap<String, Option<f64>> =
         std::collections::BTreeMap::new();
@@ -992,24 +998,92 @@ pub(crate) async fn settle_report_inner(
         }
     }
 
-    // 本次结算自己也算一次采样
-    led.samples += 1;
-    let samples = led.samples;
-    // 首次结算没有基线：以「24 小时前」兜底，给一个合理的窗口起点
-    let from = led.baseline_at.clone().unwrap_or_else(|| {
-        (now - chrono::Duration::hours(24))
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string()
-    });
-    let date = now.format("%Y-%m-%d").to_string();
-    let rep = ledger::settle(&mut led, &date, &from, &now_s, &accounts, &balances, samples);
+    // 把「旧口径下今天已经累计、但还没有小时桶」的那部分补进当天的 00 点桶。
+    // 只对还没有任何当天桶的账号做，且同一台机器只会发生一次（之后每天都有桶）。
+    let mut reconciled = false;
+    for a in &accounts {
+        let e = led.accts.entry(a.id.clone()).or_default();
+        let (d_used, d_granted) = ledger::reconcile_day_baseline(e, &date);
+        if d_used > 0.0 || d_granted > 0.0 {
+            reconciled = true;
+        }
+    }
+    // 长期没采样时文件里可能还留着几个月前的桶，顺带清掉（`merge_account` 每次
+    // 写入也会剪，这里兜「刚打开应用、本次还没写任何桶」的情况）
+    ledger::prune_buckets(&mut led.accts, now.date_naive());
 
-    // 先落盘日报、成功后才推进基线并归零采样计数：
-    // 万一写盘失败就直接返回错误，基线留在原处，下次结算还能把这段窗口补回来
-    ledger::append_report(&dir, rep.clone()).map_err(|e| e.to_string())?;
-    led.samples = 0;
-    let _ = ledger::save_ledger(&dir, &led);
+    // 当天还没走完：`sealed=false`，界面据此显示「至今」
+    let rep = ledger::build_report(
+        &led.accts,
+        &accounts,
+        &balances,
+        &date,
+        &now_s,
+        false,
+        if reconciled { 1 } else { 0 },
+    );
+
+    // 先落盘日报，成功后再保存台账（含刚写好的小时桶与已推进的旧口径基线）。
+    // 写盘失败就直接返回错误，内存里的桶不落盘，下次结算还能把这段窗口补回来
+    ledger::upsert_report(&dir, rep.clone()).map_err(|e| e.to_string())?;
+    ledger::save_ledger(&dir, &led).map_err(|e| e.to_string())?;
     Ok(rep)
+}
+
+/// 次日把昨天封口：自然日已走完，日报补成完整一天。
+///
+/// 之所以要有这一步，是因为当天 12:00 结算时窗口还没结束（`window_to` = 结算时刻），
+/// 而 12:00–24:00 之间产生的消耗要等次日才能体现在数字里。
+/// **不需要额外采样**：桶早已在各自的采样时刻归位，这里只是把当天重新聚合一遍并标记封闭。
+/// 因此即便用户次日没打开应用（[`maybe_seal_report`] 没跑到），敞口最多是
+/// 「该条日报少了 12:00→24:00 那段」，而**不会丢数据** —— 那些桶仍在台账里。
+pub fn seal_reports(
+    dir: &std::path::Path,
+    accounts: &[accounts::Account],
+    today: &str,
+) -> Vec<ledger::CreditReport> {
+    let led = ledger::load_ledger(dir);
+    let mut sealed_now = Vec::new();
+    let mut all = ledger::load_reports(dir);
+    for rep in all.iter_mut() {
+        if rep.sealed || rep.date.as_str() >= today {
+            continue;
+        }
+        let bal = rep
+            .accounts
+            .iter()
+            .filter_map(|r| r.balance)
+            .collect::<Vec<f64>>();
+        // 重新聚合：桶是唯一事实来源，`build_report` 会把 12:00 之后的部分补进来
+        let fresh = ledger::build_report(
+            &led.accts,
+            accounts,
+            &std::collections::BTreeMap::new(),
+            &rep.date,
+            &rep.generated_at,
+            true,
+            rep.granularity,
+        );
+        // 余额是「结算那一刻」的快照，重新聚合取不到，沿用原来的值
+        let mut merged = fresh;
+        for r in merged.accounts.iter_mut() {
+            if let Some(old) = rep.accounts.iter().find(|o| o.account_id == r.account_id) {
+                r.balance = old.balance;
+            }
+        }
+        merged.total_balance = if bal.is_empty() {
+            None
+        } else {
+            Some(ledger::round2_public(bal.iter().sum()))
+        };
+        *rep = merged.clone();
+        sealed_now.push(merged);
+    }
+    if !sealed_now.is_empty() {
+        // 顺带把超期的桶清掉（日报列表比桶保留期长）
+        let _ = ledger::save_reports_public(dir, &all);
+    }
+    sealed_now
 }
 
 /// 查询积分日报（新的在前）

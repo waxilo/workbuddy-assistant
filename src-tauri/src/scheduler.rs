@@ -82,6 +82,13 @@ struct ScheduleState {
     /// 共用一个字段会让「关了定时签到」连带把日报的去重也弄乱。
     #[serde(default)]
     last_report_date: Option<String>,
+    /// 最后一次给历史日报封口的日期（`YYYY-MM-DD`）
+    ///
+    /// 又是一个独立字段：封口与结算虽都在 [`maybe_settle_report`] 里，
+    /// 但语义不同 —— 封口是「补完已经过去的自然日」，每天一次、不看 `report_time`，
+    /// 挂在 `last_report_date` 上会被 `due_at` 的去重逻辑挡住而永远跑不到。
+    #[serde(default)]
+    last_seal_date: Option<String>,
 }
 
 fn state_file(dir: &Path) -> PathBuf {
@@ -297,11 +304,36 @@ fn maybe_settle_report(app: &AppHandle, dir: &Path, settings: &Settings) {
     }
     let mut state = load_state(dir);
     let now = chrono::Local::now().naive_local();
+    let today = now.date().format("%Y-%m-%d").to_string();
+
+    // 先把「昨天」封口：自然日已走完，可补上 12:00→24:00 那段。
+    // 放在 due_at 判定**之前**且不受 last_report_date 影响 —— 它是另一件事
+    // （补完历史 vs 结算今天），且不依赖任何网络请求，每天第一跳就能完成。
+    // 不这么做的话，12:00 之后产生的消耗要等次日才进数字，用户会以为漏了。
+    if state.last_seal_date.as_deref() != Some(today.as_str()) {
+        match commands::try_data_dir(app) {
+            Ok(dir) => {
+                let accounts = accounts::load_accounts(&dir);
+                let sealed = commands::seal_reports(&dir, &accounts, &today);
+                if !sealed.is_empty() {
+                    log_event(
+                        &dir,
+                        &format!("已封口 {} 天的日报（补齐 12:00→24:00 的消耗与新增）", sealed.len()),
+                    );
+                    let _ = app.emit(REPORT_EVENT, serde_json::json!({ "sealed": sealed.len() }));
+                }
+            }
+            Err(e) => log_event(dir, &format!("日报封口跳过：{e}")),
+        }
+        state.last_seal_date = Some(today.clone());
+        save_state(dir, &state);
+    }
+
     if !due_at(now, &settings.report_time, state.last_report_date.as_deref()) {
         return;
     }
     // 先落盘「今天已结算」再执行：与定时签到同理，中途崩溃也不会在补跑窗口里重复结算
-    state.last_report_date = Some(now.date().format("%Y-%m-%d").to_string());
+    state.last_report_date = Some(today);
     save_state(dir, &state);
 
     match tauri::async_runtime::block_on(commands::settle_report_inner(app)) {
@@ -309,8 +341,11 @@ fn maybe_settle_report(app: &AppHandle, dir: &Path, settings: &Settings) {
             log_event(
                 dir,
                 &format!(
-                    "积分日报已结算：消耗 {:.2} / 新增 {:.2}（窗口 {} → {}）",
-                    rep.total_consumed, rep.total_gained, rep.window_from, rep.window_to
+                    "积分日报已结算：{} 消耗 {:.2} / 新增 {:.2}（{}）",
+                    rep.date,
+                    rep.total_consumed,
+                    rep.total_gained,
+                    if rep.sealed { "全天" } else { "至今" }
                 ),
             );
             let _ = app.emit(
@@ -480,6 +515,7 @@ mod tests {
                     at: "10:12".into(),
                 }),
                 last_report_date: Some("2026-09-12".into()),
+                last_seal_date: Some("2026-09-13".into()),
             },
         );
         let loaded = load_state(&dir);
@@ -492,6 +528,8 @@ mod tests {
         );
         // 日报与签到各记各的日期：两个开关独立，去重也必须独立
         assert_eq!(loaded.last_report_date.as_deref(), Some("2026-09-12"));
+        // 封口又是第三个独立日期：挂在 last_report_date 上会被 due_at 的去重挡住
+        assert_eq!(loaded.last_seal_date.as_deref(), Some("2026-09-13"));
         let _ = fs::remove_dir_all(&dir);
     }
 
