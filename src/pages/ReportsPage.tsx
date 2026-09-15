@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { CreditReport } from "../types";
+import type { CreditReport, CreditReportAccount } from "../types";
 import { clearCreditReports, creditReports, settleCreditReport } from "../api";
 import { AccountCell, EmptyState, formatCredits } from "../common";
 import type { ConfirmReq, Toast } from "../common";
@@ -10,13 +10,20 @@ import {
   IconTrash,
 } from "../components/Icons";
 
+/** 一天的 24 个小时标签，按 0 点补零，保证条形图与刻度对齐 */
+const HOURS = Array.from({ length: 24 }, (_, h) => String(h).padStart(2, "0"));
+
+/** 参与小时条形的最大项（消耗与新增取大者），全为 0 时返回 0 */
+function peakOf(values: number[]): number {
+  return values.reduce((m, v) => (v > m ? v : m), 0);
+}
+
 /**
- * 「积分日报」页：应用常驻时每天（默认 12:00）自动结算一条，
- * 记录窗口内的**消耗**（花掉的）、**新增**（拿到的）以及每个账号的明细。
+ * 「积分日报」页：**按自然日**结算，每天一条。
  *
- * 口径不在这一层：消耗 / 新增都取自资源包的**累计**字段增量（见后端 `ledger` 模块），
- * 所以多个客户端同时消耗也都能算进来 —— 不需要按请求归因，并发也不会算错。
- * 这里只负责把后端算好的结果排开放。
+ * 后端在每次采样时就把「与上次采样相比的增量」记进**采样时刻所属的小时**，
+ * 所以「按天」与「按小时」是同一份数据的两种聚合 —— 小时之和恒等于当天合计。
+ * 这一层只做展示，不做任何口径计算。
  */
 export function ReportsPage({
   askConfirm,
@@ -57,7 +64,7 @@ export function ReportsPage({
     setBusy(true);
     try {
       const rep = await settleCreditReport();
-      // 结算会推进基线，所以直接重拉列表最稳（顺序与截断都由后端决定）
+      // 结算会重新聚合当天并覆盖同一天的那条，所以直接重拉列表最稳
       setReports(await creditReports());
       setOpenDate(rep.date);
       onToast({
@@ -74,7 +81,7 @@ export function ReportsPage({
   const doClear = async () => {
     const ok = await askConfirm({
       title: "清空积分日报",
-      body: "确认清空全部日报历史？积分台账与结算基线会保留，不影响后续统计。",
+      body: "确认清空全部日报历史？积分台账与已记录的每小时数据会保留，后续统计不受影响。",
       okText: "清空",
       danger: true,
     });
@@ -92,20 +99,20 @@ export function ReportsPage({
     <section className="panel-page">
       <p className="set-intro">
         <IconInfo size={14} />
-        每天 12:00 自动结算一次「上次结算到现在」的消耗与新增；应用未运行时不会结算，
-        下一次会把这段空档一起算进来。消耗与新增都按资源包的累计量取差值，
-        所以多个客户端同时消耗也都能统计到。
+        按自然日统计（00:00–24:00），每天 12:00 出当天的数字，次日自动补齐全天。
+        展开任意一天可以看到**每小时**的消耗与新增。消耗与新增都按资源包的累计量取差值，
+        所以多个客户端同时消耗也都能统计到；应用没运行的时段没有采样，那一格就是空的。
       </p>
 
       <div className="card logs-toolbar">
         <span className="count">
-          {loading ? "加载中…" : `共 ${reports.length} 条日报`}
+          {loading ? "加载中…" : `共 ${reports.length} 天`}
         </span>
         <span className="spacer" />
         <button
           className="btn small"
           disabled={busy}
-          title="把「上次结算到现在」的消耗与新增立刻结算成一条日报"
+          title="把今天 00:00 到现在重新结算一次（同一天会覆盖更新）"
           onClick={() => void doSettle()}
         >
           <IconRefresh size={15} className={busy ? "spin" : undefined} />
@@ -127,14 +134,14 @@ export function ReportsPage({
         <EmptyState
           icon={<IconActivity size={26} />}
           title="还没有日报"
-          hint="到点会自动结算一条；想现在就看看，点上方「立即结算」。首次结算只建立基线，消耗与新增会从那时开始累计。"
+          hint="到点会自动结算；想现在就看看，点上方「立即结算」。首次结算只建立基线，消耗与新增从那时起按小时累计。"
         />
       ) : (
         <>
           <div className="summary">
             <div className="sum-card card hoverable">
               <span className="sum-label">
-                最近消耗{latest ? `（${latest.date}）` : ""}
+                今天消耗{latest?.sealed ? "（已封口）" : "（至今）"}
               </span>
               <span className="sum-num rp-consumed">
                 {formatCredits(latest?.total_consumed ?? null)}
@@ -142,20 +149,20 @@ export function ReportsPage({
             </div>
             <div className="sum-card card hoverable">
               <span className="sum-label">
-                最近新增{latest ? `（${latest.date}）` : ""}
+                今天新增{latest?.sealed ? "（已封口）" : "（至今）"}
               </span>
               <span className="sum-num ok">
                 {formatCredits(latest?.total_gained ?? null)}
               </span>
             </div>
             <div className="sum-card card hoverable">
-              <span className="sum-label">累计消耗（{reports.length} 条）</span>
+              <span className="sum-label">累计消耗（{reports.length} 天）</span>
               <span className="sum-num rp-consumed">
                 {formatCredits(lifetime.consumed)}
               </span>
             </div>
             <div className="sum-card card hoverable">
-              <span className="sum-label">累计新增（{reports.length} 条）</span>
+              <span className="sum-label">累计新增（{reports.length} 天）</span>
               <span className="sum-num ok">{formatCredits(lifetime.gained)}</span>
             </div>
           </div>
@@ -164,7 +171,7 @@ export function ReportsPage({
             {reports.map((r) => {
               const open = openDate === r.date;
               return (
-                <article className="card report" key={`${r.date}-${r.generated_at}`}>
+                <article className="card report" key={r.date}>
                   <button
                     className="report-head"
                     aria-expanded={open}
@@ -172,7 +179,8 @@ export function ReportsPage({
                   >
                     <span className="report-date">{r.date}</span>
                     <span className="report-window">
-                      {r.window_from.slice(5, 16)} → {r.window_to.slice(5, 16)}
+                      {r.sealed ? "全天" : "至今"}
+                      {r.granularity === 1 && " · 小时明细不可用"}
                     </span>
                     <span className="spacer" />
                     <span className="report-metric">
@@ -201,52 +209,7 @@ export function ReportsPage({
                     />
                   </button>
 
-                  {open && (
-                    <div className="table-wrap">
-                      <table className="data-table">
-                        <thead>
-                          <tr>
-                            <th>账号</th>
-                            <th className="num">消耗</th>
-                            <th className="num">新增</th>
-                            <th className="num">剩余</th>
-                            <th className="num">资源包</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {r.accounts.map((a) => (
-                            <tr key={a.account_id}>
-                              <td>
-                                <AccountCell name={a.name} phone={a.phone} />
-                              </td>
-                              <td className="num">
-                                {a.consumed > 0 ? (
-                                  <span className="rp-consumed">
-                                    {formatCredits(a.consumed)}
-                                  </span>
-                                ) : (
-                                  <span className="muted">—</span>
-                                )}
-                              </td>
-                              <td className="num">
-                                {a.gained > 0 ? (
-                                  <span className="rp-gained">
-                                    +{formatCredits(a.gained)}
-                                  </span>
-                                ) : (
-                                  <span className="muted">—</span>
-                                )}
-                              </td>
-                              <td className="num num-muted">
-                                {a.balance == null ? "—" : formatCredits(a.balance)}
-                              </td>
-                              <td className="num num-muted">{a.packages}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                  {open && <ReportDetail rep={r} />}
                 </article>
               );
             })}
@@ -254,5 +217,198 @@ export function ReportsPage({
         </>
       )}
     </section>
+  );
+}
+
+/** 展开内容：每小时条形图 + 每账号明细（可再展开看该账号的逐小时） */
+function ReportDetail({ rep }: { rep: CreditReport }) {
+  /** 展开逐小时明细的账号 id（"" 表示都没展开） */
+  const [openAcct, setOpenAcct] = useState<string | null>(null);
+  const hasHourly = rep.hours.length > 0;
+  const peak = peakOf(rep.hours.flatMap((h) => [h.consumed, h.gained]));
+
+  return (
+    <>
+      {hasHourly && (
+        <div className="hour-block">
+          <div className="hour-head">
+            <span className="hour-title">每小时</span>
+            <span className="hour-legend">
+              <i className="lg-dot rp-consumed-bg" />
+              消耗
+              <i className="lg-dot rp-gained-bg" />
+              新增
+            </span>
+            <span className="hour-peak">峰值 {formatCredits(peak)}</span>
+          </div>
+          <HourChart hours={rep.hours} peak={peak} />
+          <div className="hour-axis">
+            {HOURS.map((h, i) => (
+              // 每 3 小时标一次，避免 24 个刻度挤在一起
+              <span key={h} className="hour-tick">
+                {i % 3 === 0 ? h : ""}
+              </span>
+            ))}
+          </div>
+          <p className="hour-hint">
+            只统计应用运行期间；没有采样的时段为空。「每小时」与上面合计同源，
+            24 格相加等于当天合计。
+          </p>
+        </div>
+      )}
+
+      <div className="table-wrap">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>账号</th>
+              <th className="num">消耗</th>
+              <th className="num">新增</th>
+              <th className="num">剩余</th>
+              <th className="num">资源包</th>
+              <th className="num">小时</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rep.accounts.map((a) => {
+              const open = openAcct === a.account_id;
+              const canOpen = !rep.granularity && hasHourly;
+              return (
+                <>
+                  <tr key={a.account_id}>
+                    <td>
+                      <AccountCell name={a.name} phone={a.phone} />
+                    </td>
+                    <td className="num">
+                      {a.consumed > 0 ? (
+                        <span className="rp-consumed">
+                          {formatCredits(a.consumed)}
+                        </span>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td className="num">
+                      {a.gained > 0 ? (
+                        <span className="rp-gained">
+                          +{formatCredits(a.gained)}
+                        </span>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td className="num num-muted">
+                      {a.balance == null ? "—" : formatCredits(a.balance)}
+                    </td>
+                    <td className="num num-muted">{a.packages}</td>
+                    <td className="num">
+                      {canOpen ? (
+                        <button
+                          className="btn small hour-toggle"
+                          aria-expanded={open}
+                          onClick={() =>
+                            setOpenAcct(open ? null : a.account_id)
+                          }
+                        >
+                          {open ? "收起" : "展开"}
+                        </button>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                  {open && (
+                    <tr key={`${a.account_id}-hours`} className="hour-row">
+                      <td colSpan={6}>
+                        <AcctHours acct={a} />
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+/**
+ * 单账号的逐小时明细。
+ *
+ * 用「小时 : 消耗 / 新增」的文字列表而非第二张条形图 —— 这里要看的是**精确数值**
+ * （例如「21 点到底花了多少」），条形图只适合看形状。
+ */
+function AcctHours({ acct }: { acct: CreditReportAccount }) {
+  const rows = Array.from({ length: 24 }, (_, h) => ({
+    hour: h,
+    consumed: acct.hours_consumed[h] ?? 0,
+    gained: acct.hours_gained[h] ?? 0,
+  })).filter((r) => r.consumed > 0 || r.gained > 0);
+
+  if (rows.length === 0) {
+    return <p className="hour-hint">这一天该账号没有按小时记录到变化。</p>;
+  }
+  return (
+    <ul className="acct-hours">
+      {rows.map((r) => (
+        <li key={r.hour}>
+          <span className="ah-hour">{HOURS[r.hour]}:00</span>
+          <span className="ah-consumed rp-consumed">
+            {r.consumed > 0 ? formatCredits(r.consumed) : "—"}
+          </span>
+          <span className="ah-gained rp-gained">
+            {r.gained > 0 ? "+" + formatCredits(r.gained) : "—"}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * 24 小时的双色柱状图。
+ *
+ * 用纯 CSS 柱（高度 = 值 / 峰值）而不是引图表库：一屏 24 根柱子、
+ * 数据只来自本地 IPC，为它引入一个图表依赖不划算。
+ * 每格用两个并排的细柱表示消耗与新增，各自独立按峰值归一。
+ */
+function HourChart({
+  hours,
+  peak,
+}: {
+  hours: CreditReport["hours"];
+  peak: number;
+}) {
+  const byHour = new Map(hours.map((h) => [h.hour, h]));
+  return (
+    <div className="hour-chart" role="img" aria-label="每小时消耗与新增">
+      {HOURS.map((label, h) => {
+        const item = byHour.get(h);
+        const c = item?.consumed ?? 0;
+        const g = item?.gained ?? 0;
+        const pct = (v: number) => (peak > 0 ? (v / peak) * 100 : 0);
+        return (
+          <div
+            className="hour-col"
+            key={label}
+            title={
+              item
+                ? `${label}:00　消耗 ${c}　新增 ${g}`
+                : `${label}:00　无记录`
+            }
+          >
+            <div className="hour-bars">
+              <i
+                className="bar bar-consumed"
+                style={{ height: `${pct(c)}%` }}
+              />
+              <i className="bar bar-gained" style={{ height: `${pct(g)}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }

@@ -252,35 +252,56 @@ export interface CreditReportAccount {
   account_id: string;
   name: string;
   phone: string | null;
-  /** 窗口内消耗（Σ 资源包「累计已用」的增量） */
+  /** 当天消耗（Σ 当天小时桶；下标 = 小时） */
   consumed: number;
-  /** 窗口内新增（Σ 资源包「累计授予」的增量，含签到发的包） */
+  /** 当天新增（Σ 当天小时桶，含签到发的包） */
   gained: number;
   /** 结算时点的剩余积分（取不到为 null） */
   balance: number | null;
   /** 结算时点仍在计量的资源包个数 */
   packages: number;
+  /** 该账号在这一天的 24 个消耗桶（下标 = 小时，未采样的小时为 0） */
+  hours_consumed: number[];
+  /** 该账号在这一天的 24 个新增桶 */
+  hours_gained: number[];
+}
+
+/** 某一天里某个小时的合计（只列有数据的时点） */
+export interface HourTotal {
+  /** 小时（0–23） */
+  hour: number;
+  consumed: number;
+  gained: number;
 }
 
 /**
- * 一条每日积分日报。窗口 = 上次结算时点 → 本次结算时点。
+ * 一条每日积分日报。口径 = **自然日 00:00–24:00**。
  *
  * 「消耗」与「新增」都取自接口里资源包的**累计**字段（`CapacityUsed` / `CapacitySize`）
- * 的增量，所以多个客户端同时消耗都能算进来，不需要按请求归因，并发也不会算错。
+ * 的增量，按采样时刻归入所属小时，所以多个客户端同时消耗都能算进来，
+ * 不需要按请求归因，并发也不会算错。
+ *
+ * 小时桶在采样时就已归位，因此「按天」和「按小时」是同一份数据的两种聚合：
+ * 小时之和恒等于当天合计，相邻两天可直接相加。
  */
 export interface CreditReport {
-  /** 结算日 YYYY-MM-DD（窗口结束那天，列表按它倒序） */
+  /** 结算日 YYYY-MM-DD（列表按它倒序） */
   date: string;
+  /** 该条日报的生成时刻（当天 12:00 或手动结算） */
   generated_at: string;
-  /** 窗口起点（上次结算时刻；应用长时间没开时会比 24 小时更长） */
+  /** 窗口起点，固定为当天 00:00:00 */
   window_from: string;
-  /** 窗口终点（本次结算时刻） */
+  /** 窗口终点：当天为生成时刻（还没走完），封口后为次日 00:00:00 */
   window_to: string;
+  /** 自然日是否已走完 */
+  sealed: boolean;
+  /** 0 = 逐小时数据实测可用；1 = 自然日口径上线时对当天做的补算，无小时明细 */
+  granularity: number;
   accounts: CreditReportAccount[];
   total_consumed: number;
   total_gained: number;
   /** 全部账号剩余积分合计；一个都取不到时为 null（不谎报 0） */
   total_balance: number | null;
-  /** 窗口内的采样次数（>1 说明窗口中间也被刷新过，数据更细） */
-  samples: number;
+  /** 当天每小时合计（只列有数据的时点） */
+  hours: HourTotal[];
 }

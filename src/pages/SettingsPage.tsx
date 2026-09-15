@@ -469,13 +469,13 @@ export function SettingsPage({
           </span>
           <div>
             <div className="set-card-title">积分日报</div>
-            <div className="set-card-sub">每天结算一次消耗与新增</div>
+            <div className="set-card-sub">按自然日结算，可逐小时查看</div>
           </div>
         </div>
         <div className="set-group">
           <Row
             title="开启每日积分日报"
-            desc="到点结算「上次结算到现在」的消耗与新增，并按账号记录明细。口径是资源包累计量的差值，所以多个客户端同时消耗也都能统计到。应用未运行时不结算，下次会把这段空档一并算进来。"
+            desc="按自然日（00:00–24:00）统计消耗与新增，并按账号记录明细；展开任意一天可看逐小时数据。口径是资源包累计量的差值，所以多个客户端同时消耗也都能统计到。应用未运行时没有采样，那段时间的小时格为空（不会漏计，只是归入下次采样）。"
             ctrl={
               <Toggle
                 checked={reportOn}
@@ -490,7 +490,7 @@ export function SettingsPage({
             <Row
               sub
               title="结算时刻"
-              desc="24 小时制。应用运行期间才会触发；错过时刻后 30 分钟内打开会自动补结算。这个时刻就是统计窗口的边界，因此不做随机抖动——否则相邻两天的日报无法直接相加。"
+              desc="24 小时制，默认 12:00 —— 出的是当天 00:00 到此刻的数字，次日会自动补齐全天。应用运行期间才会触发；错过时刻后 30 分钟内打开会自动补结算。"
               ctrl={
                 <input
                   type="time"
