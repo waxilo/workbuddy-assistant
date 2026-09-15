@@ -1536,4 +1536,24 @@ mod tests {
             3600
         );
     }
+
+    /// 同一秒内连点两次：不崩、不错位，第二条与第一条的跨度是 0。
+    ///
+    /// 这是真实可达的（用户连按「当前累计」）——时间戳会撞，所以 `snapshot_diffs`
+    /// 用**下标**而不是时间戳来配对。跨度 0 由界面显示成「同一时刻」，
+    /// 好过让两条互相覆盖或让某一条永远找不到参照。
+    #[test]
+    fn two_snapshots_in_the_same_second_still_pair_up_by_position() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 100.0, 0.0));
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 118.0, 0.0));
+        assert_eq!(v.len(), 2, "碰时间戳不该让任何一条被吞掉：{v:?}");
+
+        let diffs = snapshot_diffs(&v);
+        assert_eq!(diffs.len(), 1, "两条 ⇒ 一对差值");
+        let (idx, d) = &diffs[0];
+        assert_eq!(*idx, 0, "增量贴在较晚那条上（下标 0，因为它插在最前）");
+        assert_eq!(d.span_seconds, 0, "同秒 ⇒ 跨度 0");
+        assert_eq!(d.consumed, 18.0, "读数差仍然是真实的");
+    }
 }
