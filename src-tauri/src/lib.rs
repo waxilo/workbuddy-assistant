@@ -84,6 +84,8 @@ pub fn run() {
             // 积分日报：次日封口昨天（完整自然日），口径见 ledger 模块
             commands::credit_reports,
             commands::credit_reports_clear,
+            // 开启日报：清历史 + 立刻落一条 system 基线（用户不必等次日）
+            commands::credit_reports_enable,
             commands::credit_report_settle,
             // 积分快照：某一刻的读数，可与前一条相减看增量（不进日报合计）
             commands::credit_snapshots,

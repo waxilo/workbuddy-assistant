@@ -1188,6 +1188,44 @@ pub fn credit_snapshots_clear(app: AppHandle) -> Result<(), String> {
     ledger::save_snapshots(&data_dir(&app), &[]).map_err(|e| e.to_string())
 }
 
+/// 开启积分日报：**清历史 → 立即拉一次接口 → 把此刻读数落成第一条系统快照**。
+///
+/// 用户不必等到「明天首次打开应用」才看到第一条 —— 开启的那一刻就有了基线。
+/// 这条基线也是**对比的起点**：以后每天封口推一条 system 快照，system 只留最新，
+/// 所以列表里始终是「最新一天 + 你手动打的那枪」两行，干净且可比。
+///
+/// **清的是日报与快照，不是台账。** 台账里的小时桶是真实采样数据，
+/// 也是将来算「某一天消耗」的唯一依据；接口的 `CapacityUsed` 是装机以来的累计量，
+/// 清掉台账下次采样就会把这笔总量整个塞进当天，反而凭空多出一大笔。
+/// 详见 [`ledger::clear_reports_and_snapshots`]。
+///
+/// 顺序上**必须先清再采样**：反过来的话刚写进去的第一条基线会被自己清掉。
+/// 采样走 [`settle_report_inner`]，它会顺带把逐包明细并进台账（写小时桶），
+/// 但**不写日报历史** —— 日报列表只收完整自然日。
+#[tauri::command]
+pub async fn credit_reports_enable(app: AppHandle) -> Result<ledger::CreditReport, String> {
+    let dir = data_dir(&app);
+    ledger::clear_reports_and_snapshots(&dir).map_err(|e| e.to_string())?;
+
+    let rep = settle_report_inner(&app).await?;
+
+    // `settle_report_inner` 落下的是 `Manual` 快照（它不知道这是「开启」这一枪）。
+    // 开启后的第一条应该是**系统锚点** —— 只有系统快照才能压低手动快照的数量、
+    // 也只有它是「完整自然日」口径。所以这里把它升级成 System。
+    let snaps = vec![ledger::Snapshot {
+        at: rep.generated_at.clone(),
+        date: rep.date.clone(),
+        kind: ledger::SnapshotKind::System,
+        consumed: rep.total_consumed,
+        gained: rep.total_gained,
+        balance: rep.total_balance,
+        accounts: rep.accounts.len(),
+    }];
+    ledger::save_snapshots(&dir, &snaps).map_err(|e| e.to_string())?;
+
+    Ok(rep)
+}
+
 /// 当前应用版本（用于“关于/更新”展示）
 #[tauri::command]
 pub fn app_version() -> String {

@@ -711,6 +711,24 @@ pub fn clear_reports(dir: &Path) -> std::io::Result<()> {
     save_reports(dir, &[])
 }
 
+/// 清空全部日报 + 全部快照，**保留积分台账**（开启日报时用）。
+///
+/// 为什么只清这两样：用户开启日报是想从此刻开始记账，历史那几条是开启之前
+/// 攒下的、基线也不一致，留着只会让「累计」看着像凭空多出来的。
+///
+/// 为什么**不能**连台账一起清：台账里的 `hours_used` / `hours_granted` 桶是
+/// **真实采样数据**，也是「这一天的消耗」的唯一来源。清掉它并不会让数字归零 ——
+/// `CapacityUsed` 是接口侧的**累计量**，下次采样照样会把「从装机到现在」的总量
+/// 落进当天的桶里，于是开启当天就会凭空出现一笔巨额消耗。保留台账 = 保留
+/// 「上次采样到了多少」这个基准，增量才能接着算。
+///
+/// 日报与快照一起清还有个隐性理由：快照是日报的锚点来源，只清日报会留下
+/// 一条指向已消失日报的 system 快照，界面上看着像「有历史」。
+pub fn clear_reports_and_snapshots(dir: &Path) -> std::io::Result<()> {
+    clear_reports(dir)?;
+    save_snapshots(dir, &[])
+}
+
 // ── 快照存储 ─────────────────────────────────────────────────────
 //
 // 快照与日报是**两份数据**：日报是「一天一条的聚合」，快照是「某一刻的读数」。
@@ -1244,6 +1262,52 @@ mod tests {
 
         clear_reports(&dir).unwrap();
         assert!(load_reports(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 开启日报时清的是「日报 + 快照」，台账必须原样留着。
+    ///
+    /// 台账要是也被清掉，`CapacityUsed` 这个**装机以来的累计量**下次采样就会
+    /// 整个落进当天桶里 —— 用户一开启就看到一笔凭空出现的巨额消耗。
+    #[test]
+    fn enabling_report_clears_reports_and_snapshots_but_keeps_the_ledger() {
+        let dir = std::env::temp_dir().join(format!("wba-ledger-{}", uuid::Uuid::new_v4()));
+
+        upsert_report(
+            &dir,
+            CreditReport {
+                date: "2026-09-15".into(),
+                total_consumed: 10.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        save_snapshots(
+            &dir,
+            &[Snapshot {
+                at: "2026-09-15 12:00:00".into(),
+                date: "2026-09-15".into(),
+                kind: SnapshotKind::Manual,
+                consumed: 1.0,
+                gained: 2.0,
+                balance: Some(3.0),
+                accounts: 1,
+            }],
+        )
+        .unwrap();
+        let mut led = Ledger::default();
+        led.accts.insert("a1".into(), AcctLedger::default());
+        save_ledger(&dir, &led).unwrap();
+
+        clear_reports_and_snapshots(&dir).unwrap();
+
+        assert!(load_reports(&dir).is_empty(), "日报应被清空");
+        assert!(load_snapshots(&dir).is_empty(), "快照应被清空");
+        assert!(
+            !load_ledger(&dir).accts.is_empty(),
+            "台账必须保留 —— 它是增量基准，清掉会让开启当天凭空多出一大笔消耗"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
