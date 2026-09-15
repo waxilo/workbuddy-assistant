@@ -6,6 +6,7 @@ import type {
   OAuthStart,
   OAuthPoll,
   CheckinLog,
+  CreditReport,
   ImportItem,
   ImportReport,
   NetReport,
@@ -124,3 +125,16 @@ export const clearTakeoverEvents = () => invoke<void>("takeover_events_clear");
  */
 export const freeModels = (refresh: boolean) =>
   invoke<FreeModelsReport>("free_models", { refresh });
+
+/** 每日积分日报（新的在前）：窗口 = 上次结算 → 本次结算 */
+export const creditReports = () => invoke<CreditReport[]>("credit_reports");
+
+/** 清空日报历史（不影响积分台账与结算基线） */
+export const clearCreditReports = () => invoke<void>("credit_reports_clear");
+
+/**
+ * 手动结算一次：把「上次结算 → 现在」的消耗与新增写成一条日报，并把基线推到当前。
+ * 与到点自动跑的是同一条后端路径，用于验证与「我现在就想看看」。
+ */
+export const settleCreditReport = () =>
+  invoke<CreditReport>("credit_report_settle");

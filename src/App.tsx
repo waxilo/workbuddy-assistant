@@ -19,11 +19,13 @@ import { accountLabel, tally, type ConfirmReq, type Toast } from "./common";
 import { nextUpdateNotice, probeUpdate, type UpdateNotice } from "./updater";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TakeoverPage } from "./pages/TakeoverPage";
+import { ReportsPage } from "./pages/ReportsPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import {
   IconCheck,
   IconSwap,
+  IconActivity,
   IconList,
   IconGear,
   IconUserPlus,
@@ -41,13 +43,14 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
  * （网络急救已作为一张卡并入设置页，见 NetfixCard）；
  * 弹窗只留给「做完即走」的任务流（登录新账号、导入本机账号、危险操作确认）。
  */
-type Page = "accounts" | "takeover" | "logs" | "settings";
+type Page = "accounts" | "takeover" | "reports" | "logs" | "settings";
 
 type Modal = { type: "local" } | { type: "oauth" } | null;
 
 const NAV: { key: Page; label: string }[] = [
   { key: "accounts", label: "账号签到" },
   { key: "takeover", label: "智能接管" },
+  { key: "reports", label: "积分日报" },
   { key: "logs", label: "签到日志" },
   { key: "settings", label: "设置" },
 ];
@@ -55,6 +58,7 @@ const NAV: { key: Page; label: string }[] = [
 const PAGE_ICON: Record<Page, ReactNode> = {
   accounts: <IconCheck />,
   takeover: <IconSwap />,
+  reports: <IconActivity />,
   logs: <IconList />,
   settings: <IconGear />,
 };
@@ -62,6 +66,7 @@ const PAGE_ICON: Record<Page, ReactNode> = {
 const PAGE_TITLES: Record<Page, string> = {
   accounts: "账号签到",
   takeover: "智能接管",
+  reports: "积分日报",
   logs: "签到日志",
   settings: "设置",
 };
@@ -221,6 +226,20 @@ export default function App() {
       void un.then((f) => f());
     };
   }, [load, showToast]);
+
+  // 每日积分日报由后端调度线程在设定时刻（默认 12:00）结算，完成后提示一声。
+  // 日报列表由「积分日报」页自己拉取，这里只负责让用户知道后台刚做了什么。
+  useEffect(() => {
+    const un = listen<{ count?: number }>("credit-report-settled", (e) => {
+      showToast({
+        kind: "info",
+        text: `积分日报已结算（${e.payload.count ?? 0} 个账号）`,
+      });
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [showToast]);
 
   const runCheckinOne = useCallback(
     async (id: string) => {
@@ -508,12 +527,9 @@ export default function App() {
               </div>
             </>
           )}
-          {page === "logs" && (
-            <span className="status-pill">
-              <IconList size={14} />
-              按账号筛选查看签到记录
-            </span>
-          )}
+          {/* 页头右侧只放「当前页面的只读状态」：有状态才显示，没状态就留空。
+              日志页原先挂的是一句说明文案（「按账号筛选查看签到记录」），
+              既不承载状态、又与账号页那组状态胶囊长得像，已移除。 */}
         </header>
 
         <main className="content">
@@ -539,6 +555,9 @@ export default function App() {
               onSettings={setSettings}
               onToast={showToast}
             />
+          )}
+          {page === "reports" && (
+            <ReportsPage askConfirm={askConfirm} onToast={showToast} />
           )}
           {page === "logs" && (
             <LogsPage

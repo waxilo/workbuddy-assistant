@@ -36,6 +36,8 @@ export interface Settings {
   schedule_enabled: boolean;
   /** `HH:MM`，24 小时制 */
   schedule_time: string;
+  /** 定时签到的随机时间窗（分钟）：当天实际触发 = `schedule_time` + `[0, 窗口]` 内随机；0 = 关闭随机 */
+  schedule_window_minutes: number;
   /** 通知总开关 */
   notify_enabled: boolean;
   /** 通知 webhook，形如 https://…/hook/<key> */
@@ -56,10 +58,25 @@ export interface Settings {
   /** 限流无感切换生效的模型 id 列表（多选）：这些模型触发 429 时自动换备用账号重发；
    *  0 积分免费模型恒生效无需勾选，这里只存用户额外勾选的付费模型；空 = 仅免费模型 */
   rate_limit_models: string[];
+  /** 限流（429）时是否在**同一会话内**换备用账号。
+   *  true = 无感续跑，但同一会话会出现中途换凭证；false = 防御优先，429 原样透传 */
+  failover_on_rate_limit: boolean;
   /** 多账号风控预防：批量签到时在账号之间加入随机间隔 */
   stagger_checkin: boolean;
   /** 随机间隔上限（秒），实际在 2..=max 之间取值 */
   stagger_max_seconds: number;
+  /** 批量签到时随机打乱账号顺序（只影响请求次序，列表顺序不变） */
+  shuffle_checkin_order: boolean;
+  /** 手动「全部签到」也加账号间隔（避免手动路径成为唯一的瞬时连发入口） */
+  manual_stagger: boolean;
+  /** 手动「全部签到」的间隔上限（秒），实际在 2..=max 之间取值 */
+  manual_stagger_max_seconds: number;
+  /** 每日积分日报：应用常驻时每天在 report_time 结算一次 */
+  report_enabled: boolean;
+  /** 日报结算时刻，24 小时制 HH:MM（默认 12:00） */
+  report_time: string;
+  /** 日报是否推送到 webhook（复用通知总开关与地址） */
+  notify_on_report: boolean;
 }
 
 /**
@@ -228,4 +245,42 @@ export interface FreeModelsReport {
   models: ModelInfo[];
   /** fetched = 刚从网关拉取；cache = 1 小时缓存内；fallback = 拉取失败用内置兜底 */
   source: "fetched" | "cache" | "fallback";
+}
+
+/** 积分日报里的一行：某个账号在窗口内的消耗与新增 */
+export interface CreditReportAccount {
+  account_id: string;
+  name: string;
+  phone: string | null;
+  /** 窗口内消耗（Σ 资源包「累计已用」的增量） */
+  consumed: number;
+  /** 窗口内新增（Σ 资源包「累计授予」的增量，含签到发的包） */
+  gained: number;
+  /** 结算时点的剩余积分（取不到为 null） */
+  balance: number | null;
+  /** 结算时点仍在计量的资源包个数 */
+  packages: number;
+}
+
+/**
+ * 一条每日积分日报。窗口 = 上次结算时点 → 本次结算时点。
+ *
+ * 「消耗」与「新增」都取自接口里资源包的**累计**字段（`CapacityUsed` / `CapacitySize`）
+ * 的增量，所以多个客户端同时消耗都能算进来，不需要按请求归因，并发也不会算错。
+ */
+export interface CreditReport {
+  /** 结算日 YYYY-MM-DD（窗口结束那天，列表按它倒序） */
+  date: string;
+  generated_at: string;
+  /** 窗口起点（上次结算时刻；应用长时间没开时会比 24 小时更长） */
+  window_from: string;
+  /** 窗口终点（本次结算时刻） */
+  window_to: string;
+  accounts: CreditReportAccount[];
+  total_consumed: number;
+  total_gained: number;
+  /** 全部账号剩余积分合计；一个都取不到时为 null（不谎报 0） */
+  total_balance: number | null;
+  /** 窗口内的采样次数（>1 说明窗口中间也被刷新过，数据更细） */
+  samples: number;
 }
