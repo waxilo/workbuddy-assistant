@@ -80,10 +80,21 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .redirect(reqwest::redirect::Policy::none())
         // 官方域直连可达；若继承 shell 的 HTTP_PROXY 会把上游请求发去无关代理
         .no_proxy()
-        .user_agent(concat!("WorkBuddyAssistant/", env!("CARGO_PKG_VERSION")))
+        // 转发用的 UA 与账号接口一致：**不给上游注入额外身份头**（那些头由 CLI 自己带），
+        // 只保证「同一个应用发出的请求，UA 不因路径不同而变」
+        .user_agent(crate::http::UA)
         .build()
         .expect("构建 HTTP 客户端失败")
 });
+
+/// 接管内部「主动查询」用的账号接口客户端：与签到 / 刷新**同一套身份**，并强制直连。
+///
+/// 不能用 [`CLIENT`]：那个是**透传**用的，只统一 UA、**绝不向请求注入身份头**
+/// （CLI 自己带的头必须原样过去）。而拉模型清单（`fetch_models_value`）与路由决策时
+/// 重拉积分快照（`choose_account`）是我们自己主动打腾讯的计费接口，需要完整的账号接口
+/// 头条——否则同一个接口会在「代理主动查」与「签到 / 刷新」两条路径上收到两套不同的头，
+/// 正是这个项目一直在消除的那种不一致。
+static API_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(crate::http::api_client_direct);
 
 /// 一个账号的积分画像（缓存值）
 #[derive(Clone, Copy, Default, Debug)]
@@ -698,6 +709,8 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
     //    下游，正好有重试窗口：把「该账号 × 该模型」冷却到上游给出的重置时刻，换下一个
     //    账号重发同一请求，对 CLI 完全无感。付费模型的 429 与积分余额相关，原样透传不重试。
     //    重试次数有上限，用尽后 429 原样透传。
+    //    设置里关掉「限流时切换备用账号」后，这条路径整个不生效：429 直接透传，
+    //    该会话自始至终只用一个账号（见下面的 rate_limited 分支）。
     let mut ban: Vec<String> = Vec::new();
     loop {
         let Some(account) = tauri::async_runtime::block_on(choose_account(
@@ -750,52 +763,73 @@ fn handle_conn(mut stream: TcpStream, app: tauri::AppHandle) {
         };
 
         match upstream {
-            Ok(resp)
-                if is_chat
+            Ok(resp) => {
+                // 是不是「该走限流无感切换」的响应：会话内聊天 + 命中启用切换的模型 + 上游 429。
+                // 先算一次，下面两条路径共用——防御优先那条也得先认出这是限流。
+                let rate_limited = is_chat
+                    && resp.status() == 429
                     && is_rate_limited_model(
                         model.as_deref(),
                         &free_set,
                         &settings.rate_limit_models,
-                    )
-                    && resp.status() == 429 =>
-            {
-                // 重置时刻只写在响应体的文案里（网关不给 Retry-After），所以必须把体整个
-                // 读下来。代价是这段响应没法再流式透传：没有备用账号那条路径要自己把字节写回下游。
-                let limited = tauri::async_runtime::block_on(read_rate_limited(resp));
-                let (until_ms, source) = limit_until_ms(&limited.headers, &limited.body, now_ms())
-                    .unwrap_or((
-                        now_ms() + RATE_LIMIT_FALLBACK.as_millis() as i64,
-                        LimitSource::Fallback,
-                    ));
-                let model_name = model.as_deref().unwrap_or("未知");
-                // 封禁粒度 = 账号 × 模型：上游就是这么算的，这个账号的**其它模型**照用
-                let note = cooldown_note(set_cooldown(&account.id, model_name, until_ms, source));
-                // 粘滞不必解绑：冷却表已保证该「账号 × 模型」在有效期内不会被选中；
-                // 而粘滞按「会话 × 模型」分开记，这次冷却不会牵连同会话的其它模型。
-                if ban.len() + 1 < FAILOVER_MAX_TRIES {
-                    ban.push(account.id.clone());
+                    );
+
+                // 防御优先（`failover_on_rate_limit = false`）：429 原样透传，并且**连冷却都不记**。
+                // 记了冷却就等于放行「本会话的下一个请求换到别的账号」——那正是要避免的
+                // 「同一个会话出现两个凭证」。代价是这个会话要等上游自己解除限流。
+                if rate_limited && !settings.failover_on_rate_limit {
+                    let limited = tauri::async_runtime::block_on(read_rate_limited(resp));
                     stealth::journal_append(
                         &dir,
                         "failover",
                         &format!(
-                            "账号「{}」的模型「{model_name}」触发限流（429），该账号 × 该模型冷却{note}，已无感切换备用账号继续服务",
+                            "账号「{}」的模型「{}」触发限流（429）：已按「会话内不换号」原样透传，该会话不会被切到其它账号",
+                            account.name,
+                            model.as_deref().unwrap_or("未知")
+                        ),
+                    );
+                    forward_rate_limited(&mut stream, &limited, &account, &host);
+                    return;
+                }
+
+                if rate_limited {
+                    // 重置时刻只写在响应体的文案里（网关不给 Retry-After），所以必须把体整个
+                    // 读下来。代价是这段响应没法再流式透传：没有备用账号那条路径要自己把字节写回下游。
+                    let limited = tauri::async_runtime::block_on(read_rate_limited(resp));
+                    let (until_ms, source) = limit_until_ms(&limited.headers, &limited.body, now_ms())
+                        .unwrap_or((
+                            now_ms() + RATE_LIMIT_FALLBACK.as_millis() as i64,
+                            LimitSource::Fallback,
+                        ));
+                    let model_name = model.as_deref().unwrap_or("未知");
+                    // 封禁粒度 = 账号 × 模型：上游就是这么算的，这个账号的**其它模型**照用
+                    let note = cooldown_note(set_cooldown(&account.id, model_name, until_ms, source));
+                    // 粘滞不必解绑：冷却表已保证该「账号 × 模型」在有效期内不会被选中；
+                    // 而粘滞按「会话 × 模型」分开记，这次冷却不会牵连同会话的其它模型。
+                    if ban.len() + 1 < FAILOVER_MAX_TRIES {
+                        ban.push(account.id.clone());
+                        stealth::journal_append(
+                            &dir,
+                            "failover",
+                            &format!(
+                                "账号「{}」的模型「{model_name}」触发限流（429），该账号 × 该模型冷却{note}，已无感切换备用账号继续服务",
+                                account.name
+                            ),
+                        );
+                        continue;
+                    }
+                    stealth::journal_append(
+                        &dir,
+                        "failover",
+                        &format!(
+                            "账号「{}」的模型「{model_name}」触发限流（429），该账号 × 该模型冷却{note}，已无更多备用账号，限流响应原样透传",
                             account.name
                         ),
                     );
-                    continue;
+                    forward_rate_limited(&mut stream, &limited, &account, &host);
+                    return;
                 }
-                stealth::journal_append(
-                    &dir,
-                    "failover",
-                    &format!(
-                        "账号「{}」的模型「{model_name}」触发限流（429），该账号 × 该模型冷却{note}，已无更多备用账号，限流响应原样透传",
-                        account.name
-                    ),
-                );
-                forward_rate_limited(&mut stream, &limited, &account, &host);
-                return;
-            }
-            Ok(resp) => {
+
                 stream_response(&mut stream, resp, &dir, &account, &host, &path);
                 return;
             }
@@ -955,7 +989,7 @@ async fn fetch_models_value(host: &str, token: &str) -> Option<serde_json::Value
         "{}/v2/enterprises/personal/models",
         host.trim_end_matches('/')
     );
-    let resp = CLIENT.get(&url).bearer_auth(token).send().await.ok()?;
+    let resp = API_CLIENT.get(&url).bearer_auth(token).send().await.ok()?;
     resp.json().await.ok()
 }
 
@@ -1396,7 +1430,7 @@ async fn choose_account(
             .unwrap_or_default();
         if snapshot_stale(acct.credit_snapshot.as_ref()) {
             let host = commands::account_host(acct);
-            let snap = fetch_credit_snapshot(&CLIENT, &host, &acct.token).await;
+            let snap = fetch_credit_snapshot(&API_CLIENT, &host, &acct.token).await;
             info = CreditInfo {
                 expiry_ms: snap.earliest_expiry_ms,
                 credits: snap.credits,
