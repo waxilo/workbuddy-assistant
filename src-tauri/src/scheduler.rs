@@ -76,17 +76,11 @@ struct ScheduleState {
     /// 今天随机挑定的触发时刻（跨天自动重挑；见 [`target_time`]）
     #[serde(default)]
     today_target: Option<DayTarget>,
-    /// 最后一次积分日报结算的日期（`YYYY-MM-DD`）
+    /// 最后一次给日报做每日结算的日期（`YYYY-MM-DD`）
     ///
-    /// 与 `last_run_date` 分开记：日报与定时签到是两个独立开关、两个时刻，
-    /// 共用一个字段会让「关了定时签到」连带把日报的去重也弄乱。
-    #[serde(default)]
-    last_report_date: Option<String>,
-    /// 最后一次给历史日报封口的日期（`YYYY-MM-DD`）
-    ///
-    /// 又是一个独立字段：封口与结算虽都在 [`maybe_settle_report`] 里，
-    /// 但语义不同 —— 封口是「补完已经过去的自然日」，每天一次、不看 `report_time`，
-    /// 挂在 `last_report_date` 上会被 `due_at` 的去重逻辑挡住而永远跑不到。
+    /// 结算时刻固定 24:00（见 [`accounts::REPORT_TIME`]），而 24:00 属于次日，
+    /// 因此这一字段实际记录的是「今天是否已经把过去的自然日算完了」——
+    /// 每天一次、不看具体时分、不依赖网络。
     #[serde(default)]
     last_seal_date: Option<String>,
 }
@@ -179,6 +173,10 @@ fn refresh_scan_due(last_scan_ms: Option<i64>, now_ms: i64) -> bool {
 /// 今天是否该跑了：设定时刻已过（但不超过补跑窗口），且今天还没跑过。
 ///
 /// 抽成纯函数以便单测——时间判断最容易在边界上出错（跨天、未来时刻、重复跑）。
+///
+/// **只服务定时签到。** 日报不走这里：它的结算时刻固定 24:00，而 `NaiveTime`
+/// 表示不了 24:00（合法范围到 `23:59:59`），传进来必然解析失败而永不触发；
+/// 日报改用「次日首次运行结算昨天」的判定，见 [`maybe_settle_report`]。
 pub(crate) fn due_at(
     now: chrono::NaiveDateTime,
     time: &str,
@@ -290,14 +288,23 @@ fn maybe_auto_refresh(app: &AppHandle, dir: &Path) {
     }
 }
 
-/// 每日积分日报：到点（默认 12:00）结算一次，并按设置推送。
+/// 每日积分日报：**次日结算「昨天」**，并按设置推送。
 ///
-/// 复用定时签到那套「到点即触发 + 补跑窗口」判定（[`due_at`]），理由相同：
-/// 应用常常是在预定时刻之后才被打开的，精确命中某一分钟并不现实。
+/// 结算时刻固定 24:00（[`accounts::REPORT_TIME`]，用户不可改）。24:00 不是一个
+/// 能「到点触发」的时刻 —— 它已经是次日的 00:00，而且 [`due_at`] 用的
+/// `NaiveTime` 根本表示不了 24:00。所以这里不走去点判定，而是换个说法：
 ///
-/// **刻意不加随机时间窗**：日报不像签到那样有「被认成脚本」的风险；而它的触发时刻
-/// 就是统计窗口的边界 —— 让边界随机抖动，等于每天的统计区间都在飘，
-/// 「相邻两条能不能直接相加」就不再成立。用户要的是 12 点这个确定时点。
+/// **当天走完（= 到了次日）后的第一次运行，把昨天封口。**
+///
+/// 这样每条日报都是一个**完整自然日**（00:00–24:00），列表里任意两条都能直接相加，
+/// 也不会出现「同一个日期先看到半天、次日又变成全天」的前后不一致。
+///
+/// 代价是推送时间变成「次日首次打开应用时」——这正是「结算时刻 24:00」的应有之义：
+/// 全天数字只有当天结束后才算得出来。若用户想随时看当前累计，用界面上的「当前累计」，
+/// 那是一次性快照、不落盘。
+///
+/// 封口不依赖任何网络请求（桶早在采样时就归位了，这里只是重新聚合），
+/// 所以每天第一跳就能完成，不受账号在线状态影响。
 fn maybe_settle_report(app: &AppHandle, dir: &Path, settings: &Settings) {
     if !settings.report_enabled {
         return;
@@ -306,65 +313,54 @@ fn maybe_settle_report(app: &AppHandle, dir: &Path, settings: &Settings) {
     let now = chrono::Local::now().naive_local();
     let today = now.date().format("%Y-%m-%d").to_string();
 
-    // 先把「昨天」封口：自然日已走完，可补上 12:00→24:00 那段。
-    // 放在 due_at 判定**之前**且不受 last_report_date 影响 —— 它是另一件事
-    // （补完历史 vs 结算今天），且不依赖任何网络请求，每天第一跳就能完成。
-    // 不这么做的话，12:00 之后产生的消耗要等次日才进数字，用户会以为漏了。
-    if state.last_seal_date.as_deref() != Some(today.as_str()) {
-        match commands::try_data_dir(app) {
-            Ok(dir) => {
-                let accounts = accounts::load_accounts(&dir);
-                let sealed = commands::seal_reports(&dir, &accounts, &today);
-                if !sealed.is_empty() {
-                    log_event(
-                        &dir,
-                        &format!("已封口 {} 天的日报（补齐 12:00→24:00 的消耗与新增）", sealed.len()),
-                    );
-                    let _ = app.emit(REPORT_EVENT, serde_json::json!({ "sealed": sealed.len() }));
-                }
-            }
-            Err(e) => log_event(dir, &format!("日报封口跳过：{e}")),
-        }
-        state.last_seal_date = Some(today.clone());
-        save_state(dir, &state);
-    }
-
-    if !due_at(now, &settings.report_time, state.last_report_date.as_deref()) {
+    // 每天只做一次。先落盘再推送：推送失败/中断都不该让同一天重复结算。
+    if state.last_seal_date.as_deref() == Some(today.as_str()) {
         return;
     }
-    // 先落盘「今天已结算」再执行：与定时签到同理，中途崩溃也不会在补跑窗口里重复结算
-    state.last_report_date = Some(today);
+
+    let Ok(data_dir) = commands::try_data_dir(app) else {
+        log_event(dir, "日报结算跳过：数据目录不可用");
+        return;
+    };
+    let accounts = accounts::load_accounts(&data_dir);
+    let sealed = commands::seal_reports(&data_dir, &accounts, &today);
+
+    state.last_seal_date = Some(today.clone());
     save_state(dir, &state);
 
-    match tauri::async_runtime::block_on(commands::settle_report_inner(app)) {
-        Ok(rep) => {
-            log_event(
-                dir,
-                &format!(
-                    "积分日报已结算：{} 消耗 {:.2} / 新增 {:.2}（{}）",
-                    rep.date,
-                    rep.total_consumed,
-                    rep.total_gained,
-                    if rep.sealed { "全天" } else { "至今" }
-                ),
-            );
-            let _ = app.emit(
-                REPORT_EVENT,
-                serde_json::json!({ "count": rep.accounts.len() }),
-            );
-            if settings.notify_enabled && settings.notify_on_report {
-                // 通知失败只记日志，绝不影响日报本身
-                let outcome = match tauri::async_runtime::block_on(notify::send(
-                    &settings.notify_webhook,
-                    &ledger::report_message(&rep),
-                )) {
-                    Ok(resp) => format!("日报通知已发送：{resp}"),
-                    Err(e) => format!("日报通知发送失败：{e}"),
-                };
-                log_event(dir, &outcome);
-            }
+    if sealed.is_empty() {
+        // 昨天没产生任何数据（或已封口过）——不打扰用户，也不推空日报
+        return;
+    }
+
+    let total_days = sealed.len();
+    let latest = sealed.first().cloned();
+    log_event(
+        &data_dir,
+        &format!(
+            "已结算 {} 天的日报（结算时刻 {REPORT_TIME}，每条均为完整自然日）",
+            total_days,
+            REPORT_TIME = accounts::REPORT_TIME,
+        ),
+    );
+    let _ = app.emit(
+        REPORT_EVENT,
+        serde_json::json!({ "sealed": total_days }),
+    );
+
+    // 只推最新那条（通常是昨天）。补算了多天时，前面的天是历史欠账，
+    // 一次性推出去会把通知刷屏，用户真正关心的是刚结束的那一天。
+    if settings.notify_enabled && settings.notify_on_report {
+        if let Some(rep) = latest {
+            let outcome = match tauri::async_runtime::block_on(notify::send(
+                &settings.notify_webhook,
+                &ledger::report_message(&rep),
+            )) {
+                Ok(resp) => format!("日报通知已发送（{}）：{resp}", rep.date),
+                Err(e) => format!("日报通知发送失败（{}）：{e}", rep.date),
+            };
+            log_event(dir, &outcome);
         }
-        Err(e) => log_event(dir, &format!("积分日报结算异常：{e}")),
     }
 }
 
@@ -514,7 +510,6 @@ mod tests {
                     date: "2026-09-12".into(),
                     at: "10:12".into(),
                 }),
-                last_report_date: Some("2026-09-12".into()),
                 last_seal_date: Some("2026-09-13".into()),
             },
         );
@@ -526,9 +521,7 @@ mod tests {
             loaded.today_target.as_ref().map(|t| t.at.as_str()),
             Some("10:12")
         );
-        // 日报与签到各记各的日期：两个开关独立，去重也必须独立
-        assert_eq!(loaded.last_report_date.as_deref(), Some("2026-09-12"));
-        // 封口又是第三个独立日期：挂在 last_report_date 上会被 due_at 的去重挡住
+        // 日报的日期独立于签到：两个开关互不影响，去重也必须独立
         assert_eq!(loaded.last_seal_date.as_deref(), Some("2026-09-13"));
         let _ = fs::remove_dir_all(&dir);
     }

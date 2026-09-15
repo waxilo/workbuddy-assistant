@@ -81,10 +81,14 @@ pub fn run() {
             commands::set_autostart,
             commands::get_checkin_logs,
             commands::clear_checkin_logs,
-            // 积分日报：每日 12 点结算「消耗 / 新增」，口径见 ledger 模块
+            // 积分日报：次日封口昨天（完整自然日），口径见 ledger 模块
             commands::credit_reports,
             commands::credit_reports_clear,
             commands::credit_report_settle,
+            // 积分快照：某一刻的读数，可与前一条相减看增量（不进日报合计）
+            commands::credit_snapshots,
+            commands::credit_snapshot_diffs,
+            commands::credit_snapshots_clear,
             commands::app_version,
             // 网络急救：扫出「调试残留的全局服务端点」并一键清除（含关闭本地反代）
             netfix::net_diagnose,

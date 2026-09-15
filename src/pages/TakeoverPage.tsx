@@ -360,8 +360,10 @@ export function TakeoverPage({
     <section className="panel-page tk-page">
       <p className="set-intro">
         <IconInfo size={14} />
-        开启后 WorkBuddy 的对话请求由本地代理转发，按「积分最早过期优先」在账号间分配扣费；
-        下方记录每一次开关、路由与异常。
+        <span>
+          开启后 WorkBuddy 的对话请求由本地代理转发，按「积分最早过期优先」在账号间分配扣费；
+          下方记录每一次开关、路由与异常。
+        </span>
       </p>
 
       {/* ── 紧凑控制条：开关 + 状态 + 扣费账号 / 限流切换（弹窗入口）+ 端口 ── */}

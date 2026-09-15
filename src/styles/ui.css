@@ -57,6 +57,9 @@
 }
 
 /* 页面引导语：设置页与智能接管页共用 */
+/* 说明条：图标 + 一段正文。
+   正文必须整体包在一个元素里（调用方用 <span>）—— 容器是 flex，裸的 <b>/<i> 会
+   各自变成一个 flex item，把一句话拆成竖排的几列（踩过：日报页的「完整一天」）。 */
 .set-intro {
   display: flex;
   align-items: center;
@@ -65,6 +68,10 @@
   color: var(--muted);
   font-size: var(--fs-body);
   line-height: 1.6;
+}
+.set-intro > span {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .set-intro svg {
   flex: 0 0 auto;

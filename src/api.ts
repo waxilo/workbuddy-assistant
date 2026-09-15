@@ -7,6 +7,8 @@ import type {
   OAuthPoll,
   CheckinLog,
   CreditReport,
+  CreditSnapshot,
+  SnapshotDiff,
   ImportItem,
   ImportReport,
   NetReport,
@@ -133,8 +135,24 @@ export const creditReports = () => invoke<CreditReport[]>("credit_reports");
 export const clearCreditReports = () => invoke<void>("credit_reports_clear");
 
 /**
- * 手动结算一次：把「上次结算 → 现在」的消耗与新增写成一条日报，并把基线推到当前。
- * 与到点自动跑的是同一条后端路径，用于验证与「我现在就想看看」。
+ * 取一次**当前累计读数**（「当前累计」按钮）。
+ *
+ * 会实时重拉接口、把逐包明细并进台账，并把这一刻的读数落成一条 `manual` 快照
+ * （可与别的快照相减看增量）。但**不写日报历史** —— 日报列表只收完整自然日。
  */
 export const settleCreditReport = () =>
   invoke<CreditReport>("credit_report_settle");
+
+/** 积分快照（新的在前）：某一刻的读数，不是「一天的聚合」 */
+export const creditSnapshots = () =>
+  invoke<CreditSnapshot[]>("credit_snapshots");
+
+/**
+ * 每条快照与它**前面那一条**的差值增量。
+ * 下标对应 {@link creditSnapshots} 返回数组里的位置；最老的一条没有前辈，不在结果里。
+ */
+export const creditSnapshotDiffs = () =>
+  invoke<[number, SnapshotDiff][]>("credit_snapshot_diffs");
+
+/** 清空全部快照（含系统锚点）。不影响日报历史与积分台账 */
+export const clearCreditSnapshots = () => invoke<void>("credit_snapshots_clear");

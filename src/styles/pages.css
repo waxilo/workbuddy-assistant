@@ -507,6 +507,23 @@
   line-height: 1.5;
 }
 
+/* 只读的设置值：长得像控件但不可交互（比禁用态更明确——不是"暂时不能用"，
+   而是"这个值本来就不开放修改"） */
+.set-readonly {
+  display: inline-flex;
+  align-items: center;
+  height: var(--pill-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: var(--fs-cap);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  user-select: none;
+}
+
 .set-group {
   flex: 1;
   padding: 6px 18px;
@@ -914,6 +931,128 @@
 /* 展开的明细表：与上面那行之间留一条分隔线，不然会贴在按钮上 */
 .report .table-wrap {
   border-top: 1px solid var(--border);
+}
+
+/* ── 当前累计快照弹窗 ───────────────────────────────────────── */
+/* 快照弹窗里的汇总卡：4 张并排，比页面上的略紧凑（弹窗宽度有限） */
+.snap-summary {
+  margin: 4px 0 0;
+}
+.snap-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 10px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  font-size: var(--fs-cap);
+  line-height: 1.6;
+  color: var(--muted);
+}
+.snap-note svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+/* 正文包一层：容器是 flex，裸的 <b> 会变成独立 flex item 把文字拆成几列
+   （与 .set-intro 同一个坑） */
+.snap-note > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.snap-when {
+  margin: 12px 0 0;
+  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 快照区（日报页底部） ────────────────────────────────────
+   独立于日报列表：口径是「某一刻的读数」而不是「一天一条」，所以它
+   不参与合计，也不与日报混合排序。每行右侧给出与上一条的增量。 */
+.snap-block {
+  padding: 14px 18px 16px;
+}
+.snap-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.snap-title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text);
+}
+.snap-sub {
+  font-size: var(--fs-cap);
+  color: var(--muted);
+}
+.snap-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+/* 行本身用 panel-2 打底，靠 1px 缝隙形成分隔线 */
+.snap-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  background: var(--panel-2);
+  font-size: var(--fs-cap);
+  font-variant-numeric: tabular-nums;
+}
+.snap-tag {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: var(--fs-micro);
+  color: var(--muted);
+}
+/* 系统快照是锚点，给它一点强调；手动是临时样本，保持低调 */
+.snap-tag.system {
+  border-color: var(--primary-line);
+  background: var(--primary-soft);
+  color: var(--primary-d);
+}
+.snap-at {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+.snap-bal {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.snap-pts {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snap-delta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sd-span {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+}
+.sd-first {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-style: italic;
+}
+.snap-block .snap-note {
+  margin: 12px 0 0;
 }
 
 /* ── 逐小时视图 ───────────────────────────────────────────────

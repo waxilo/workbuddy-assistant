@@ -58,6 +58,12 @@ use std::path::{Path, PathBuf};
 /// 保留的日报条数上限（约一年多），超出后丢弃最旧的
 const MAX_REPORTS: usize = 400;
 
+/// 保留的**手动**快照上限。
+///
+/// 手动快照有两种命运（见 [`SnapshotKind`]）：有系统快照做锚点时只剩一格，
+/// 没有锚点时可以累积。累积那一支必须有上限，否则连点几十次就是一个只增不减的列表。
+const MAX_MANUAL_SNAPSHOTS: usize = 20;
+
 /// 小时桶保留天数。60 天 = 1440 个 (日期, 小时) 组合 / 账号，
 /// JSON 体积可忽略，但足够回看两个月里的任意一天。
 const KEEP_DAYS: i64 = 60;
@@ -163,7 +169,7 @@ impl AcctLedger {
 /// 全账号台账。
 ///
 /// 自然日口径下**不再需要结算基线**：某天的值就是那天 24 个小时桶之和，
-/// 与「什么时候点的结算」无关。因此连点两次「立即结算」得到的是同一条日报的刷新，
+/// 与「什么时候点的结算」无关。因此连点两次结算得到的是同一条日报的刷新，
 /// 而不是一条接近全 0 的新日报。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Ledger {
@@ -351,6 +357,88 @@ pub struct CreditReport {
     /// 当天每小时合计（只列有数据的时点 —— 全列 24 行只会把界面灌满 0）
     #[serde(default)]
     pub hours: Vec<HourTotal>,
+}
+
+/// 快照的来源。决定它在列表里的地位，以及被谁覆盖。
+///
+/// - `System`：次日封口产生的**完整自然日**。日报列表的「合计」只算这些，任意两条可直接相加。
+/// - `Manual`：用户点「当前累计」打的一次性读数。它是**临时样本**，用于和上一条对比看增量，
+///   **不进合计** —— 同一天既有半截又有全天混进合计会重复计数。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotKind {
+    System,
+    Manual,
+}
+
+/// 一条快照：某个时刻的读数。与 [`CreditReport`] 的区别是**它不按天聚合**，
+/// 而是「这一刻的累计消耗/新增/剩余」，因此两条快照相减就是这段时间的真实增量。
+///
+/// 刻意**不实现 `Default`**：`kind` 没有中立取值，凭空造一条 `System` 空快照
+/// 会被 `push_snapshot` 当成真锚点，把用户手动积累的样本清掉。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Snapshot {
+    /// 打这一枪的时刻 `YYYY-MM-DD HH:MM:SS`
+    pub at: String,
+    /// 它属于哪一天（`YYYY-MM-DD`）—— 出于展示与排序的需要，不参与口径计算
+    #[serde(default)]
+    pub date: String,
+    pub kind: SnapshotKind,
+    /// 读数：从台账里对齐到的「此刻累计」
+    ///
+    /// 注意这不是余额而是**累计消耗/新增**，两条相减才有意义
+    /// （余额相减会被「先消耗后签到」抵消掉）。
+    pub consumed: f64,
+    pub gained: f64,
+    /// 截至此刻全部账号的剩余积分合计（全取不到时为 None）
+    #[serde(default)]
+    pub balance: Option<f64>,
+    /// 参与统计的账号数
+    #[serde(default)]
+    pub accounts: usize,
+}
+
+/// 两条快照之间的增量（`newer - older`）。界面用它回答「这段时间到底用了多少」。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct SnapshotDiff {
+    /// 参照的那条（较早）
+    pub from_at: String,
+    /// 当前这条（较晚）
+    pub to_at: String,
+    /// 两条之间的时间跨度，按 `HH:MM:SS` 展开成总秒数（跨天也会正确累加）
+    pub span_seconds: i64,
+    pub consumed: f64,
+    pub gained: f64,
+}
+
+impl Snapshot {
+    /// 与更早的一条快照求差。`self` 是较晚的那条。
+    ///
+    /// 只做减法，不做任何「修正」：两边都是累计量，差值天然覆盖多客户端同时消耗。
+    pub fn diff_from(&self, older: &Snapshot) -> SnapshotDiff {
+        SnapshotDiff {
+            from_at: older.at.clone(),
+            to_at: self.at.clone(),
+            span_seconds: seconds_between(&older.at, &self.at),
+            consumed: round2(self.consumed - older.consumed),
+            gained: round2(self.gained - older.gained),
+        }
+    }
+}
+
+/// 解析 `YYYY-MM-DD HH:MM:SS`，算出两个时刻相差多少秒（解析失败返回 0）。
+///
+/// 用 `NaiveDateTime` 而不是 `Local`：快照的字符串没有时区信息，
+/// 而同一个进程写出的两条时间戳用同一种解释即可，不需要引入时区推断。
+fn seconds_between(from: &str, to: &str) -> i64 {
+    let parse = |s: &str| {
+        chrono::NaiveDateTime::parse_from_str(s.trim(), "%Y-%m-%d %H:%M:%S").ok()
+    };
+    match (parse(from), parse(to)) {
+        (Some(a), Some(b)) => (b - a).num_seconds(),
+        // 任一条读不出来就返回 0：界面上显示「跨度未知」比显示一个算错的数字好
+        _ => 0,
+    }
 }
 
 /// 从一个账号的桶里取出某天的值（缺失返回全 0）
@@ -586,10 +674,18 @@ fn save_reports(dir: &Path, reports: &[CreditReport]) -> std::io::Result<()> {
     write_atomic(&reports_file(dir), &serde_json::to_string_pretty(&f)?)
 }
 
-/// 按 `date` 写入一条日报：同一天**覆盖**，不同天才新增。
+/// 按 `date` 写入一条日报：同一天**覆盖**，不同天才新增；并维持排序与条数上限。
 ///
-/// 同一天被覆盖是刻意的：结算只是把当天已经落好的小时桶重新聚合一遍，
-/// 结果只会更全，绝不该在列表里存成两条同一天。
+/// 同一天覆盖是必须的：封口会把某天从「已有数据」重算成「完整一天」，
+/// 若追加而不是覆盖，列表里就会出现同一个日期的两条记录。
+///
+/// **生产代码已不再走这条路径**：日报列表现在只由
+/// [`crate::commands::seal_reports`] 通过「读全量 → 就地改 → [`save_reports_public`]」
+/// 生成，而「当前累计」是一次性快照、根本不落盘。这里保留下来是因为
+/// 「同日覆盖 + 条数上限」这两个不变量需要单测固定住（见
+/// `upsert_replaces_the_same_day_and_keeps_newest_first`），
+/// 加 `#[cfg(test)]` 是为了不留一条永远不执行的生产代码路径。
+#[cfg(test)]
 pub fn upsert_report(dir: &Path, rep: CreditReport) -> std::io::Result<()> {
     let mut all = load_reports(dir);
     match all.iter().position(|r| r.date == rep.date) {
@@ -601,9 +697,124 @@ pub fn upsert_report(dir: &Path, rep: CreditReport) -> std::io::Result<()> {
     save_reports(dir, &all)
 }
 
+/// 落盘日报列表前的**统一整理**：按日期降序 + 截断到上限。
+///
+/// 封口路径是「读全量 → 就地改 → 整体写回」，不经过写入单条的函数，
+/// 所以必须在这里再收一次口，否则日报会无限增长（曾经就漏了这一步）。
+pub fn normalize_reports(reports: &mut Vec<CreditReport>) {
+    reports.sort_by(|a, b| b.date.cmp(&a.date));
+    reports.truncate(MAX_REPORTS);
+}
+
 /// 清空全部日报（不影响台账与基线）
 pub fn clear_reports(dir: &Path) -> std::io::Result<()> {
     save_reports(dir, &[])
+}
+
+// ── 快照存储 ─────────────────────────────────────────────────────
+//
+// 快照与日报是**两份数据**：日报是「一天一条的聚合」，快照是「某一刻的读数」。
+// 分开存是因为写入规则完全不同 —— 日报按 date 覆盖，快照要按 kind 决定覆盖还是累积。
+
+/// 快照文件的包装（带 schema 版本，风格与 [ReportsFile] 一致）
+#[derive(Serialize, Deserialize)]
+struct SnapshotsFile {
+    v: u32,
+    snapshots: Vec<Snapshot>,
+}
+
+/// 快照文件 schema 版本
+const SNAPSHOTS_SCHEMA: u32 = 1;
+
+pub fn snapshots_file(dir: &Path) -> PathBuf {
+    dir.join("credit_snapshots.json")
+}
+
+/// 读快照：**新的在前**（界面直接顺序渲染）
+pub fn load_snapshots(dir: &Path) -> Vec<Snapshot> {
+    decode_snapshots(&fs::read_to_string(snapshots_file(dir)).unwrap_or_default())
+}
+
+/// 解析快照文件。版本对不上即丢弃（与日报同一套策略：宁可少几条展示，也不混读旧语义）。
+fn decode_snapshots(raw: &str) -> Vec<Snapshot> {
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(f) = serde_json::from_str::<SnapshotsFile>(raw) else {
+        return Vec::new();
+    };
+    if f.v != SNAPSHOTS_SCHEMA {
+        return Vec::new();
+    }
+    f.snapshots
+}
+
+pub fn save_snapshots(dir: &Path, snaps: &[Snapshot]) -> std::io::Result<()> {
+    let f = SnapshotsFile {
+        v: SNAPSHOTS_SCHEMA,
+        snapshots: snaps.to_vec(),
+    };
+    write_atomic(&snapshots_file(dir), &serde_json::to_string_pretty(&f)?)
+}
+
+/// 把一条新快照并入列表 —— **这里是四条规则唯一落地的地方**。
+///
+/// 规则（用户拍板，`kind` 决定命运）：
+///
+/// | 已有 | 新来 | 结果 |
+/// |---|---|---|
+/// | 无 | 手动 | 存下，等对比 |
+/// | 手动（无系统快照） | 手动 | **并存** —— 自由样本，可两两对比 |
+/// | 系统 + 手动 | 手动 | **覆盖那条手动** —— 有锚点后手动只剩一格 |
+/// | 系统 + 手动 | 系统 | **覆盖那条手动**，系统也只留最新 —— 手动作废 |
+///
+/// 归纳成一句话：**只剩最新一条系统快照 + 手动快照若干（有系统快照时压缩成一条）**。
+///
+/// 为什么「有系统快照就压缩手动」：系统快照是完整自然日，是唯一能进合计的口径。
+/// 手动快照在它出现之后就只是「日内临时读数」，留多条没有意义，还会让界面上
+/// 同一天的样本越堆越多；而在没有系统快照时（刚装上、或还没到次日），
+/// 手动快照就是唯一的对比依据，必须允许累积。
+pub fn push_snapshot(snaps: &mut Vec<Snapshot>, snap: Snapshot) {
+    match snap.kind {
+        SnapshotKind::System => {
+            // 系统快照：先清掉全部手动样本（它们已经被这一枪「覆盖」掉了），
+            // 再清掉旧系统快照 —— 系统快照本身也只留最新一条，否则同一天封口两次就会两条。
+            snaps.retain(|s| s.kind != SnapshotKind::Manual);
+            snaps.retain(|s| s.kind != SnapshotKind::System);
+            snaps.push(snap);
+        }
+        SnapshotKind::Manual => {
+            let has_system = snaps.iter().any(|s| s.kind == SnapshotKind::System);
+            if has_system {
+                // 有锚点：手动只剩一格 —— 覆盖掉之前那条手动
+                snaps.retain(|s| s.kind != SnapshotKind::Manual);
+                snaps.push(snap);
+            } else {
+                // 没锚点：累积，供两两对比。上限兜住「连点几十次」的极端情况。
+                snaps.insert(0, snap);
+                // 保留最新的 MAX_MANUAL_SNAPSHOTS 条（列表是新的在前）
+                if snaps.len() > MAX_MANUAL_SNAPSHOTS {
+                    snaps.truncate(MAX_MANUAL_SNAPSHOTS);
+                }
+            }
+        }
+    }
+    snaps.sort_by(|a, b| b.at.cmp(&a.at)); // 新的在前
+}
+
+/// 把每条快照与它**前面那一条**配对求差，返回 `(下标, 增量)`。
+///
+/// 下标指的是「较晚那条」在 `snaps` 里的位置，前端按它把增量贴到对应行上；
+/// 最老的一条没有前辈，不出现在结果里（界面显示「首个样本」而不是一堆 0）。
+///
+/// 这里直接用「后一位」而不是比较时间戳：`snaps` 保证新的在前，位置关系就是
+/// 时间关系，且同一秒内连点两次也不会互相干扰 —— 时间戳会撞，下标不会。
+pub fn snapshot_diffs(snaps: &[Snapshot]) -> Vec<(usize, SnapshotDiff)> {
+    snaps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| snaps.get(i + 1).map(|older| (i, s.diff_from(older))))
+        .collect()
 }
 
 /// 日报的推送文案（与 `notify::send` 的纯文本约定一致）
@@ -1121,5 +1332,208 @@ mod tests {
             ..rep.clone()
         };
         assert!(report_message(&sealed).contains("全天 00:00–24:00"));
+    }
+
+
+    // ── 快照写入规则（用户拍板的四条，逐条钉死） ──────────────────
+
+    fn snap(at: &str, kind: SnapshotKind, consumed: f64, gained: f64) -> Snapshot {
+        Snapshot {
+            at: at.into(),
+            date: at[..10].to_string(),
+            kind,
+            consumed,
+            gained,
+            balance: Some(1000.0),
+            accounts: 2,
+        }
+    }
+
+    fn manual(at: &str, c: f64, g: f64) -> Snapshot {
+        snap(at, SnapshotKind::Manual, c, g)
+    }
+    fn system(at: &str, c: f64, g: f64) -> Snapshot {
+        snap(at, SnapshotKind::System, c, g)
+    }
+
+    /// 规则 1：没有任何快照时手动打一条 —— 存下（等对比），不结算
+    #[test]
+    fn first_manual_snapshot_is_kept_as_a_baseline() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 100.0, 50.0));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, SnapshotKind::Manual);
+        // 它是第一条 ⇒ 没有参照物，不出现在差值表里
+        assert!(snapshot_diffs(&v).is_empty());
+    }
+
+    /// 规则 1'：**没有系统快照**时，手动快照可以累积并存（自由样本，可两两对比）
+    #[test]
+    fn manual_snapshots_accumulate_while_no_system_snapshot_exists() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 100.0, 50.0));
+        push_snapshot(&mut v, manual("2026-09-15 12:00:00", 130.0, 50.0));
+        push_snapshot(&mut v, manual("2026-09-15 15:00:00", 150.0, 60.0));
+
+        assert_eq!(v.len(), 3, "没有锚点时必须并存，否则无法对比：{v:?}");
+        assert!(v.iter().all(|s| s.kind == SnapshotKind::Manual));
+        // 新的在前
+        assert_eq!(v[0].at, "2026-09-15 15:00:00");
+        // 三条 ⇒ 两对差值；最新那条的参照是次新的那条
+        let diffs = snapshot_diffs(&v);
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].0, 0, "第一对贴在最新那条上");
+        assert_eq!(diffs[0].1.from_at, "2026-09-15 12:00:00");
+    }
+
+    /// 规则 2：存在快照时手动打一条 —— 能和已有的那条对比（差值 = 真实增量）
+    #[test]
+    fn manual_snapshot_can_be_compared_with_the_previous_one() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 100.0, 50.0));
+        push_snapshot(&mut v, manual("2026-09-15 14:30:00", 142.3, 50.0));
+
+        let diffs = snapshot_diffs(&v);
+        assert_eq!(diffs.len(), 1, "两条 ⇒ 一对差值");
+        let (idx, d) = &diffs[0];
+        assert_eq!(*idx, 0, "贴在较晚的那条上");
+
+        assert_eq!(d.from_at, "2026-09-15 10:00:00");
+        assert_eq!(d.to_at, "2026-09-15 14:30:00");
+        assert_eq!(d.span_seconds, 4 * 3600 + 30 * 60, "跨度应为 4.5 小时");
+        assert_eq!(d.consumed, 42.3, "增量必须是两条读数之差");
+        assert_eq!(d.gained, 0.0);
+    }
+
+    /// 规则 3：**存在系统快照**时再手动打一条 —— 覆盖上一条手动（手动只剩一格）
+    #[test]
+    fn manual_snapshot_replaces_the_previous_manual_once_a_system_snapshot_exists() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, system("2026-09-15 00:00:00", 100.0, 50.0));
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 130.0, 50.0));
+        assert_eq!(v.len(), 2);
+
+        push_snapshot(&mut v, manual("2026-09-15 12:00:00", 160.0, 50.0));
+        let manuals: Vec<_> = v.iter().filter(|s| s.kind == SnapshotKind::Manual).collect();
+        assert_eq!(manuals.len(), 1, "有锚点后手动只剩一格：{v:?}");
+        assert_eq!(manuals[0].at, "2026-09-15 12:00:00");
+        // 系统快照不受影响
+        assert!(v.iter().any(|s| s.kind == SnapshotKind::System));
+    }
+
+    /// 规则 4：**存在系统快照**时又来一条系统快照 —— 覆盖上一条手动，系统也只留最新
+    #[test]
+    fn system_snapshot_clears_the_pending_manual_and_replaces_the_old_system() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, system("2026-09-15 00:00:00", 100.0, 50.0));
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 130.0, 50.0));
+        assert_eq!(v.len(), 2);
+
+        push_snapshot(&mut v, system("2026-09-16 00:00:00", 200.0, 80.0));
+        assert_eq!(v.len(), 1, "手动作废、旧系统被替换：{v:?}");
+        assert_eq!(v[0].kind, SnapshotKind::System);
+        assert_eq!(v[0].at, "2026-09-16 00:00:00");
+    }
+
+    /// 系统快照本身也去重：同一天封口两次不该留下两条系统快照
+    #[test]
+    fn system_snapshots_never_pile_up() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, system("2026-09-15 00:00:00", 100.0, 50.0));
+        push_snapshot(&mut v, system("2026-09-16 00:00:00", 200.0, 80.0));
+        push_snapshot(&mut v, system("2026-09-17 00:00:00", 260.0, 80.0));
+        assert_eq!(v.len(), 1, "系统快照只留最新一条：{v:?}");
+        assert_eq!(v[0].at, "2026-09-17 00:00:00");
+    }
+
+    /// 无锚点的手动快照累积也有上限（防止连点几十次堆出一个只增不减的列表）
+    #[test]
+    fn accumulating_manual_snapshots_are_capped() {
+        let mut v = Vec::new();
+        for i in 0..(MAX_MANUAL_SNAPSHOTS + 5) {
+            push_snapshot(&mut v, manual(&format!("2026-09-15 10:{i:02}:00"), i as f64, 0.0));
+        }
+        assert_eq!(v.len(), MAX_MANUAL_SNAPSHOTS);
+    }
+
+    /// 生命周期全流程：装好 → 手动×2 → 系统 → 手动 → 系统
+    #[test]
+    fn snapshot_lifecycle_follows_the_four_rules() {        let mut v = Vec::new();
+        // 1) 没有任何快照，手动一条 —— 存下
+        push_snapshot(&mut v, manual("2026-09-15 09:00:00", 10.0, 0.0));
+        assert_eq!(v.len(), 1);
+        // 1') 仍无系统快照，再手动 —— 并存
+        push_snapshot(&mut v, manual("2026-09-15 11:00:00", 25.0, 0.0));
+        assert_eq!(v.len(), 2);
+        // 4) 系统快照到来 —— 手动全清，只留这条系统
+        push_snapshot(&mut v, system("2026-09-16 00:00:00", 40.0, 100.0));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, SnapshotKind::System);
+        // 3) 有锚点后手动 —— 只有一格
+        push_snapshot(&mut v, manual("2026-09-16 10:00:00", 55.0, 100.0));
+        push_snapshot(&mut v, manual("2026-09-16 14:00:00", 70.0, 100.0));
+        let m: Vec<_> = v.iter().filter(|s| s.kind == SnapshotKind::Manual).collect();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].at, "2026-09-16 14:00:00");
+        // 4) 又一个系统快照 —— 手动作废
+        push_snapshot(&mut v, system("2026-09-17 00:00:00", 90.0, 120.0));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, SnapshotKind::System);
+    }
+
+    /// 锚点出现的**那一刻**要有清理作用，而不是等下一次手动：
+    /// 没有锚点时攒了 3 条手动，系统快照一来必须全部让位，否则列表里会同时
+    /// 存在「锚点」和「锚点之前的自由样本」，差值语义混乱。
+    #[test]
+    fn an_arriving_system_snapshot_purges_every_pre_anchor_manual() {
+        let mut v = Vec::new();
+        push_snapshot(&mut v, manual("2026-09-15 09:00:00", 10.0, 0.0));
+        push_snapshot(&mut v, manual("2026-09-15 11:00:00", 25.0, 0.0));
+        push_snapshot(&mut v, manual("2026-09-15 13:00:00", 33.0, 0.0));
+        assert_eq!(v.len(), 3);
+
+        push_snapshot(&mut v, system("2026-09-16 00:00:00", 40.0, 100.0));
+        assert_eq!(v.len(), 1, "锚点到来必须清掉全部锚点前的手动：{v:?}");
+        assert_eq!(v[0].kind, SnapshotKind::System);
+        // 只剩一条 ⇒ 没有可比对象
+        assert!(snapshot_diffs(&v).is_empty());
+    }
+
+    /// 快照文件往返 + 旧/坏文件被安全丢弃（与日报同一套 schema 策略）
+    #[test]
+    fn snapshots_round_trip_and_survive_a_broken_file() {
+        let dir = std::env::temp_dir().join(format!("wb-snap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut v = Vec::new();
+        push_snapshot(&mut v, system("2026-09-15 00:00:00", 100.0, 50.0));
+        push_snapshot(&mut v, manual("2026-09-15 10:00:00", 130.0, 50.0));
+        save_snapshots(&dir, &v).unwrap();
+
+        let back = load_snapshots(&dir);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].at, "2026-09-15 10:00:00");
+        assert_eq!(back[0].kind, SnapshotKind::Manual);
+        assert_eq!(back[1].kind, SnapshotKind::System);
+
+        // 坏 JSON / 空文件都不该 panic，返回空即可
+        assert!(decode_snapshots("{not json").is_empty());
+        assert!(decode_snapshots("").is_empty());
+        // 版本对不上丢弃
+        assert!(decode_snapshots(r#"{"v":99,"snapshots":[]}"#).is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 时间戳解析不出来时跨度返回 0（宁可显示「未知」，也不要一个算错的数字）
+    #[test]
+    fn an_unparsable_timestamp_yields_a_zero_span() {
+        assert_eq!(seconds_between("坏掉的时间", "2026-09-15 10:00:00"), 0);
+        assert_eq!(seconds_between("2026-09-15 10:00:00", ""), 0);
+        // 跨天要正确累加
+        assert_eq!(
+            seconds_between("2026-09-15 23:30:00", "2026-09-16 00:30:00"),
+            3600
+        );
     }
 }

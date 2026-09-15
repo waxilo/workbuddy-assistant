@@ -305,3 +305,46 @@ export interface CreditReport {
   /** 当天每小时合计（只列有数据的时点） */
   hours: HourTotal[];
 }
+
+/**
+ * 一条积分快照：**某一刻的读数**，而不是「一天的聚合」。
+ *
+ * 与 [`CreditReport`] 的关键区别是它不做任何按天聚合 —— `consumed` / `gained` 是
+ * **从装机到那一刻的累计量**，所以两条快照相减就是这段时间的真实增量，
+ * 这才使得「手动打一枪 → 过一阵再打一枪 → 看差了多少」成立。
+ *
+ * 正因为是累计量而不是余额，`gained` 与 `consumed` 各自独立、互不抵消
+ * （余额相减会被「先消耗后签到」抹平）。
+ */
+export interface CreditSnapshot {
+  /** 打这一枪的时刻 YYYY-MM-DD HH:MM:SS */
+  at: string;
+  /** 它属于哪一天（YYYY-MM-DD），仅用于展示 */
+  date: string;
+  /**
+   * 来源。决定它在列表里的地位与被谁覆盖：
+   * - `system`：次日封口产生的完整自然日，是**锚点**；
+   * - `manual`：「当前累计」按钮打的一次性读数。
+   */
+  kind: "system" | "manual";
+  /** 截至此刻的**累计**消耗（不是余额！） */
+  consumed: number;
+  /** 截至此刻的**累计**新增 */
+  gained: number;
+  /** 截至此刻全部账号剩余积分合计；一个都取不到时为 null */
+  balance: number | null;
+  /** 参与统计的账号数 */
+  accounts: number;
+}
+
+/** 两条快照之间的增量（较晚 − 较早）。回答「这段时间到底用了多少」 */
+export interface SnapshotDiff {
+  /** 参照的那条（较早） */
+  from_at: string;
+  /** 当前这条（较晚） */
+  to_at: string;
+  /** 两条之间的时间跨度（秒） */
+  span_seconds: number;
+  consumed: number;
+  gained: number;
+}

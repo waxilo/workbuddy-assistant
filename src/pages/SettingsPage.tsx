@@ -57,9 +57,8 @@ export function SettingsPage({
   const [webhook, setWebhook] = useState(settings.notify_webhook);
   const [notifySched, setNotifySched] = useState(settings.notify_on_schedule);
   const [notifyManual, setNotifyManual] = useState(settings.notify_on_manual);
-  // 积分日报：每天定时结算「消耗 / 新增」；推送复用上面那套通知总开关与 webhook
+  // 积分日报：按自然日结算「消耗 / 新增」；推送复用上面那套通知总开关与 webhook
   const [reportOn, setReportOn] = useState(settings.report_enabled);
-  const [reportTime, setReportTime] = useState(settings.report_time);
   const [notifyReport, setNotifyReport] = useState(settings.notify_on_report);
   // 多账号风控：批量签到时账号之间随机歇几秒，避免同 IP 瞬时连发
   const [staggerOn, setStaggerOn] = useState(settings.stagger_checkin);
@@ -171,7 +170,9 @@ export function SettingsPage({
     <section className="panel-page">
       <p className="set-intro">
         <IconInfo size={14} />
-        定时签到、多账号风控、签到通知、应用更新与网络急救。智能接管相关配置请在「智能接管」页调整。
+        <span>
+          定时签到、多账号风控、签到通知、应用更新与网络急救。智能接管相关配置请在「智能接管」页调整。
+        </span>
       </p>
 
       {/* 签到自动化 */}
@@ -490,17 +491,11 @@ export function SettingsPage({
             <Row
               sub
               title="结算时刻"
-              desc="24 小时制，默认 12:00 —— 出的是当天 00:00 到此刻的数字，次日会自动补齐全天。应用运行期间才会触发；错过时刻后 30 分钟内打开会自动补结算。"
+              desc="固定 24:00，不可修改。24:00 就是「一个完整自然日」的边界 —— 只有按整天结算，日报列表里任意两条才能直接相加。因此实际结算发生在次日首次打开应用时，把昨天整条算完再推送。想随时看当前累计，用日报页的「当前累计」（只弹窗查看，不进历史）。"
               ctrl={
-                <input
-                  type="time"
-                  value={reportTime}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setReportTime(v);
-                    patch({ report_time: v.trim() });
-                  }}
-                />
+                <span className="set-readonly" title="结算时刻固定为 24:00">
+                  24:00
+                </span>
               }
             />
           )}
