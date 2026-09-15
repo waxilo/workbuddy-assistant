@@ -135,6 +135,16 @@ export const creditReports = () => invoke<CreditReport[]>("credit_reports");
 export const clearCreditReports = () => invoke<void>("credit_reports_clear");
 
 /**
+ * **开启积分日报**：清空日报与快照历史 → 立即拉一次接口 → 把此刻读数落成
+ * 第一条**系统快照**（兼作对比基线）。
+ *
+ * 有了这一步，用户不必等「次日首次打开应用」才看到第一条；开启即有一条基线，
+ * 之后每天封口各推一条。**保留积分台账**（小时桶是真实采样，且是增量的基准）。
+ */
+export const enableCreditReports = () =>
+  invoke<CreditReport>("credit_reports_enable");
+
+/**
  * 取一次**当前累计读数**（「当前累计」按钮）。
  *
  * 会实时重拉接口、把逐包明细并进台账，并把这一刻的读数落成一条 `manual` 快照

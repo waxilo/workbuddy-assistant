@@ -3,6 +3,7 @@ import type {
   CreditReport,
   CreditReportAccount,
   CreditSnapshot,
+  Settings,
   SnapshotDiff,
 } from "../types";
 import {
@@ -11,11 +12,14 @@ import {
   creditReports,
   creditSnapshotDiffs,
   creditSnapshots,
+  enableCreditReports,
+  saveSettings,
   settleCreditReport,
 } from "../api";
 import { AccountCell, EmptyState, formatCredits } from "../common";
 import type { ConfirmReq, Toast } from "../common";
 import { Dialog } from "../components/Dialog";
+import { Toggle } from "../components/SettingsControls";
 import {
   IconActivity,
   IconInfo,
@@ -55,17 +59,29 @@ function spanText(sec: number): string {
  *
  * 快照是另一个东西：**某一刻的读数**，单独一块区域展示，**不进日报合计**。
  * 它回答的是「我刚点的这一枪，比上回多了多少」—— 日报答不了（日报只按天给）。
+ *
+ * 日报**开关**放在这一页（而不是设置页）：设置页管的是「全局开关与推送」，
+ * 而「这一天记不记账」是这一页的主场 —— 开关就在列表上方，关了立刻能看出
+ * 列表会停更。推送开关仍在设置页（通知类配置集中在一处）。
  */
 export function ReportsPage({
+  settings,
   askConfirm,
+  onSettings,
   onToast,
 }: {
+  settings: Settings;
   askConfirm: (opts: Omit<ConfirmReq, "resolve">) => Promise<boolean>;
+  /** 开关落库后把最新 settings 同步回外层（后端可能代为改写字段） */
+  onSettings: (s: Settings) => void;
   onToast: (t: Toast) => void;
 }) {
   const [reports, setReports] = useState<CreditReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  /** 开启/关闭日报的落库状态（与「当前累计」的 busy 分开：两者互不阻塞） */
+  const [toggleBusy, setToggleBusy] = useState(false);
+  const [reportOn, setReportOn] = useState(settings.report_enabled);
   /** 展开的日报日期；一次只展开一条，避免长列表被撑得找不到北 */
   const [openDate, setOpenDate] = useState<string | null>(null);
   /** 临时快照（「当前累计」的结果）。非 null 时弹出查看 */
@@ -73,6 +89,12 @@ export function ReportsPage({
   /** 落盘的快照列表（含系统锚点）与它们两两之间的增量 */
   const [snaps, setSnaps] = useState<CreditSnapshot[]>([]);
   const [diffs, setDiffs] = useState<Map<number, SnapshotDiff>>(new Map());
+
+  // 外部（设置页/接管页）改了 settings 时要同步本地开关，否则页面上显示的
+  // 还是旧状态，一点就会把对面的改动顶回去。
+  useEffect(() => {
+    setReportOn(settings.report_enabled);
+  }, [settings.report_enabled]);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -125,6 +147,55 @@ export function ReportsPage({
     }
   };
 
+  /**
+   * 开启 / 关闭积分日报。
+   *
+   * **开启要经过确认**：它会清掉已有的日报与快照（只留台账），并把此刻读数落成
+   * 第一条系统快照当基线 —— 用户点开列表发现历史没了，得先知道这是预期的。
+   * 关闭则只是改个开关，不动任何数据。
+   *
+   * 顺序很重要：**先落库再清+建基线**做不到（后端命令本身要先清），所以这里
+   * 让后端一次性做完（清 → 采样 → 落基线），成功后前端把列表与快照一起刷新。
+   * 失败时开关回滚，绝不让界面显示「已开启」而实际没生效。
+   */
+  const doToggleReport = async (next: boolean) => {
+    if (next) {
+      const ok = await askConfirm({
+        title: "开启积分日报",
+        body:
+          "开启后会用此刻的读数打一条基线（系统快照），以后每天封口出完整一天。\n\n" +
+          "为了不让历史数字与新基线混在一起，已生成的日报与快照会被清空；" +
+          "积分台账（逐小时采样）保留，统计不受影响。",
+        okText: "开启并建立基线",
+      });
+      if (!ok) return;
+    }
+    setToggleBusy(true);
+    try {
+      if (next) {
+        const rep = await enableCreditReports();
+        setReports([]);
+        setOpenDate(null);
+        onToast({
+          kind: "ok",
+          text: `日报已开启，基线：累计消耗 ${formatCredits(rep.total_consumed)}`,
+        });
+      }
+      const saved = await saveSettings({ ...settings, report_enabled: next });
+      onSettings(saved);
+      setReportOn(next);
+      // 无论开还是关都重拉一遍：开启时正好把刚落的基线显示出来
+      refresh();
+      refreshSnaps();
+      if (!next) onToast({ kind: "ok", text: "日报已关闭，不再生成新日报" });
+    } catch (e) {
+      setReportOn(!next);
+      onToast({ kind: "err", text: "操作失败：" + String(e) });
+    } finally {
+      setToggleBusy(false);
+    }
+  };
+
   const doClear = async () => {
     const ok = await askConfirm({
       title: "清空积分日报",
@@ -173,6 +244,16 @@ export function ReportsPage({
       </p>
 
       <div className="card logs-toolbar">
+        <label className="rp-toggle" title="开启后按自然日生成日报，次日封口出完整一天">
+          <Toggle
+            checked={reportOn}
+            disabled={toggleBusy}
+            onChange={(v) => void doToggleReport(v)}
+          />
+          <span className="rp-toggle-text">
+            {reportOn ? "已开启" : "已关闭"}
+          </span>
+        </label>
         <span className="count">
           {loading ? "加载中…" : `共 ${reports.length} 天`}
         </span>
@@ -196,13 +277,27 @@ export function ReportsPage({
         </button>
       </div>
 
+      {!reportOn && (
+        <p className="set-intro">
+          <IconInfo size={14} />
+          <span>
+            日报已关闭，不会再生成新的日报；已有的记录仍保留，你随时可以重新开启。
+            重新开启时会用<b>此刻的读数</b>打一条新基线，并清掉旧的日报与快照。
+          </span>
+        </p>
+      )}
+
       {loading ? (
         <p className="empty">加载中…</p>
       ) : reports.length === 0 ? (
         <EmptyState
           icon={<IconActivity size={26} />}
-          title="还没有日报"
-          hint="每条日报都在次日首次打开应用时生成（结算时刻固定 24:00）。想现在就看当前累计，点上方「当前累计」。"
+          title={reportOn ? "还没有日报" : "日报未开启"}
+          hint={
+            reportOn
+              ? "开启时报下的是基线（已记入下方快照），当天走完后的次日首次打开应用会生成第一条完整日报。想现在就看当前累计，点上方「当前累计」。"
+              : "用上方的开关开启，开启时会立刻用此刻读数建立基线，之后每天封口出一条完整日报。"
+          }
         />
       ) : (
         <>

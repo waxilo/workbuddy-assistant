@@ -7,7 +7,6 @@ import {
   IconCalendar,
   IconShield,
   IconBell,
-  IconActivity,
   IconCheck,
   IconAlertTriangle,
   IconInfo,
@@ -22,6 +21,9 @@ import { NetfixCard } from "../components/NetfixCard";
  * 卡片式分组布局：每个主题一张卡，每条设置左右分栏（左侧标题 + 说明，右侧控件），
  * 开关统一用 .switch 切换。网络急救作为一张卡收敛在本页底部（见 NetfixCard），
  * 智能接管仍独立成页；接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
+ *
+ * 日报的**开关**在「积分日报」页（那一页才是它的主场），本页只留它的
+ * **推送开关**并与两条签到通知并排 —— 「哪些东西会推送」集中在一处才看得清。
  */
 export function SettingsPage({
   version,
@@ -57,8 +59,8 @@ export function SettingsPage({
   const [webhook, setWebhook] = useState(settings.notify_webhook);
   const [notifySched, setNotifySched] = useState(settings.notify_on_schedule);
   const [notifyManual, setNotifyManual] = useState(settings.notify_on_manual);
-  // 积分日报：按自然日结算「消耗 / 新增」；推送复用上面那套通知总开关与 webhook
-  const [reportOn, setReportOn] = useState(settings.report_enabled);
+  // 积分日报：按自然日结算「消耗 / 新增」。**日报本身的开关在「积分日报」页**，
+  // 这里只留「结算后推送」——它与两条签到通知开关并排，一眼看清「哪些会推送」。
   const [notifyReport, setNotifyReport] = useState(settings.notify_on_report);
   // 多账号风控：批量签到时账号之间随机歇几秒，避免同 IP 瞬时连发
   const [staggerOn, setStaggerOn] = useState(settings.stagger_checkin);
@@ -382,15 +384,15 @@ export function SettingsPage({
         </div>
       </div>
 
-      {/* 签到通知 */}
+      {/* 签到与日报通知 */}
       <div className="set-card card">
         <div className="set-card-head">
           <span className="set-card-icon">
             <IconBell size={20} />
           </span>
           <div>
-            <div className="set-card-title">签到通知</div>
-            <div className="set-card-sub">签到结果通过 webhook 推送到你的渠道</div>
+            <div className="set-card-title">签到与日报通知</div>
+            <div className="set-card-sub">签到结果与积分日报都通过同一个 webhook 推送</div>
           </div>
         </div>
         <div className="set-group">
@@ -457,61 +459,22 @@ export function SettingsPage({
                   />
                 }
               />
+              <Row
+                bare
+                title="积分日报结算后推送"
+                desc="每天封口出完整一天后推一条。日报本身的开关在「积分日报」页。"
+                ctrl={
+                  <Toggle
+                    checked={notifyReport}
+                    onChange={(v) => {
+                      setNotifyReport(v);
+                      patch({ notify_on_report: v });
+                    }}
+                  />
+                }
+              />
             </div>
           )}
-        </div>
-      </div>
-
-      {/* 积分日报 */}
-      <div className="set-card card">
-        <div className="set-card-head">
-          <span className="set-card-icon">
-            <IconActivity size={20} />
-          </span>
-          <div>
-            <div className="set-card-title">积分日报</div>
-            <div className="set-card-sub">按自然日结算，可逐小时查看</div>
-          </div>
-        </div>
-        <div className="set-group">
-          <Row
-            title="开启每日积分日报"
-            desc="按自然日（00:00–24:00）统计消耗与新增，并按账号记录明细；展开任意一天可看逐小时数据。口径是资源包累计量的差值，所以多个客户端同时消耗也都能统计到。应用未运行时没有采样，那段时间的小时格为空（不会漏计，只是归入下次采样）。"
-            ctrl={
-              <Toggle
-                checked={reportOn}
-                onChange={(v) => {
-                  setReportOn(v);
-                  patch({ report_enabled: v });
-                }}
-              />
-            }
-          />
-          {reportOn && (
-            <Row
-              sub
-              title="结算时刻"
-              desc="固定 24:00，不可修改。24:00 就是「一个完整自然日」的边界 —— 只有按整天结算，日报列表里任意两条才能直接相加。因此实际结算发生在次日首次打开应用时，把昨天整条算完再推送。想随时看当前累计，用日报页的「当前累计」（只弹窗查看，不进历史）。"
-              ctrl={
-                <span className="set-readonly" title="结算时刻固定为 24:00">
-                  24:00
-                </span>
-              }
-            />
-          )}
-          <Row
-            title="结算后推送"
-            desc="把日报推到「签到通知」里配置的 webhook。通知总开关关着时不会推送，日报本身照常记录。"
-            ctrl={
-              <Toggle
-                checked={notifyReport}
-                onChange={(v) => {
-                  setNotifyReport(v);
-                  patch({ notify_on_report: v });
-                }}
-              />
-            }
-          />
         </div>
       </div>
 

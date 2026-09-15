@@ -1055,6 +1055,21 @@
   margin: 12px 0 0;
 }
 
+/* 日报页的开关：`.logs-toolbar` 是 flex，控件间距交给它的 gap，
+   这里只负责「开关 + 状态文字」自己内部对齐（文字跟着开关走，别被 flex 拉开）。 */
+.rp-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  cursor: pointer;
+}
+.rp-toggle-text {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 /* ── 逐小时视图 ───────────────────────────────────────────────
    24 根纯 CSS 柱，不引图表库：数据来自本地 IPC、只有一屏柱子，
    为它加一个依赖不划算。每格两根细柱表示消耗与新增，各自按峰值归一。 */

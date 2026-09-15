@@ -71,11 +71,21 @@ export interface Settings {
   manual_stagger: boolean;
   /** 手动「全部签到」的间隔上限（秒），实际在 2..=max 之间取值 */
   manual_stagger_max_seconds: number;
-  /** 每日积分日报：应用常驻时每天在 report_time 结算一次 */
+  /**
+   * 是否开启每日积分日报。
+   *
+   * 这个开关的入口在**积分日报页**（那一页才是它的主场），不在设置页。
+   * 开启时会清掉已有的日报与快照，并用此刻读数打一条**系统快照**当基线
+   * （见 `enableCreditReports`），因此列表不会出现「历史与新基线混在一起」。
+   */
   report_enabled: boolean;
-  /** 日报结算时刻，24 小时制 HH:MM（默认 12:00） */
+  /** 日报结算时刻，固定 24:00（后端强制覆盖，前端只读展示） */
   report_time: string;
-  /** 日报是否推送到 webhook（复用通知总开关与地址） */
+  /**
+   * 日报是否推送到 webhook（复用通知总开关与地址）。
+   *
+   * 在设置页与两条签到通知开关并排展示 —— 「哪些东西会推送」集中一处才好核对。
+   */
   notify_on_report: boolean;
 }
 

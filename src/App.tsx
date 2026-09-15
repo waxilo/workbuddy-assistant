@@ -556,8 +556,13 @@ export default function App() {
               onToast={showToast}
             />
           )}
-          {page === "reports" && (
-            <ReportsPage askConfirm={askConfirm} onToast={showToast} />
+          {page === "reports" && settings && (
+            <ReportsPage
+              settings={settings}
+              askConfirm={askConfirm}
+              onSettings={setSettings}
+              onToast={showToast}
+            />
           )}
           {page === "logs" && (
             <LogsPage
