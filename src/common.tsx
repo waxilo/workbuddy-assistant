@@ -1,8 +1,12 @@
+import type { ReactNode } from "react";
 import type { Account, CheckinLog } from "./types";
+import { IconUser } from "./components/Icons";
 
 /**
- * 跨页面共享的 UI 基础件：类型、展示助手与状态徽标。
- * 只放「无业务依赖」的东西，任何页面都能安全引用。
+ * 跨页面共享的 UI 基础件：类型、展示助手与状态原子。
+ *
+ * 这里的组件是「同一个概念在多个页面必须长得一样」的地方——状态圆点、账号单元格。
+ * 页面各自复制一份必然会漂移（历史上账号页用圆点、日志页用实心胶囊，就是那样来的）。
  */
 
 export type Toast = { kind: "ok" | "err" | "info"; text: string } | null;
@@ -30,6 +34,34 @@ export function baseName(p: string): string {
 export function formatCredits(v?: number | null): string {
   if (v == null) return "—";
   return String(Math.round(v * 100) / 100);
+}
+
+/**
+ * 账号当前剩余积分：最近一次签到/刷新写入的余额（`last.balance`）为准，
+ * 它缺失时回退到积分快照（`credit_snapshot.credits`）；都没有 → null（未知）。
+ *
+ * 首页「剩余积分」列与「总积分」汇总**共用**这个口径，两处永远对得上。
+ */
+export function accountCredits(a: Account): number | null {
+  return a.last?.balance ?? a.credit_snapshot?.credits ?? null;
+}
+
+/**
+ * 一批账号的积分合计（首页汇总卡片用）。
+ *
+ * - 按每个账号**展示用的两位小数**累加，保证总积分恰好等于列表里各行「剩余积分」之和。
+ * - 未拉到积分的账号不计入（0 与「未知」含义不同）；全都没拉到 → null，由调用方显示「—」。
+ */
+export function totalCredits(accounts: Account[]): number | null {
+  let sum = 0;
+  let known = false;
+  for (const a of accounts) {
+    const v = accountCredits(a);
+    if (v == null) continue;
+    sum += Math.round(v * 100) / 100;
+    known = true;
+  }
+  return known ? Math.round(sum * 100) / 100 : null;
 }
 
 /** 手机号脱敏（纯展示）：11 位纯数字按 138****1234 处理，其它字符串原样返回 */
@@ -126,29 +158,78 @@ export function tally(
 }
 
 /**
- * 账号最近一次签到结果的徽标。
+ * 账号最近一次签到结果的**状态圆点**文案。
  *
  * 注意顺序：服务端对「今天已签到」返回 HTTP 400 + `code=10001`，
  * 此时 `success` 也是 true（幂等成功），所以必须**先判 already**，
  * 否则「今日已签」永远显示成「成功」。
  */
-/** 徽标只关心这三个互斥字段（CheckinRecord / CheckinLog 都满足） */
-type BadgeState = { success: boolean; already: boolean; inactive: boolean } | null;
+export type DotTone = "signing" | "done" | "pending" | "fail" | "inactive";
 
-export function ResultBadge({ last }: { last: BadgeState }) {
-  if (!last) return <span className="badge badge-idle">未签到</span>;
-  if (last.already) return <span className="badge badge-already">今日已签</span>;
-  if (last.success) return <span className="badge badge-ok">成功</span>;
-  if (last.inactive) return <span className="badge badge-idle">活动未开</span>;
-  return <span className="badge badge-err">失败</span>;
+/** 状态圆点：全应用唯一的「状态」表达。表格里的状态列一律用它，不要再用实心胶囊。 */
+export function StatusDot({ tone, label }: { tone: DotTone; label: string }) {
+  return (
+    <span className={`status-dot ${tone}`}>
+      <i className="dot" />
+      <span>{label}</span>
+    </span>
+  );
 }
 
-export function LogBadge({ log }: { log: CheckinLog }) {
-  // 同 ResultBadge：`already` 必须优先于 `success`（已签时二者都为 true）
-  if (log.already) return <span className="badge badge-already">今日已签</span>;
-  if (log.success) return <span className="badge badge-ok">成功</span>;
-  if (log.inactive) return <span className="badge badge-idle">活动未开</span>;
-  return <span className="badge badge-err">失败</span>;
+/** 签到日志的一条结果 → 状态圆点（与账号页「状态」列同一套视觉，只是文案不同） */
+export function logStatus(log: CheckinLog): { tone: DotTone; label: string } {
+  // 同 signState：`already` 必须优先于 `success`（已签时二者都为 true）
+  if (log.already) return { tone: "done", label: "今日已签" };
+  if (log.success) return { tone: "done", label: "成功" };
+  if (log.inactive) return { tone: "inactive", label: "活动未开" };
+  return { tone: "fail", label: "失败" };
+}
+
+/**
+ * 账号单元格：头像 + 名称 + 手机号。
+ *
+ * 账号页与签到日志页共用，「同一个人在两处长得一样」由它保证；日志页此前只用
+ * 一行文字拼接，名称本身就是手机号时会显示成 `191****2883（191****2883）`。
+ */
+export function AccountCell({
+  name,
+  phone,
+}: {
+  name: string;
+  phone?: string | null;
+}) {
+  const initial = /^\d/.test(name) ? null : name.slice(0, 1);
+  const shown = maskPhone(name);
+  const alt = phone ? maskPhone(phone) : "";
+  return (
+    <div className="ac-cell-name">
+      <span className="ac-avatar">{initial ?? <IconUser size={16} />}</span>
+      <div className="ac-id">
+        <span className="ac-name">{shown}</span>
+        {/* 手机号与名称相同时不再重复一行 */}
+        {alt && alt !== shown && <span className="ac-phone">{alt}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** 空态：图标 + 主文案 +（可选）补充说明。账号页与签到日志页共用。 */
+export function EmptyState({
+  icon,
+  title,
+  hint,
+}: {
+  icon?: ReactNode;
+  title: string;
+  hint?: string;
+}) {
+  return (
+    <div className="empty">
+      {icon}
+      <span>{title}</span>
+      {hint && <span className="empty-sub">{hint}</span>}
+    </div>
+  );
 }
 
 /// 积分过期时间展示：毫秒时间戳 → 「MM-DD HH:mm」；已过期的标 expired。

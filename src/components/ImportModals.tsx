@@ -14,6 +14,7 @@ import {
 } from "../api";
 import { baseName, maskPhone, maskToken } from "../common";
 import type { Toast } from "../common";
+import { Dialog } from "./Dialog";
 
 /**
  * 账号导入的两条通道（都保留弹窗形态——它们是「做完即走」的任务流）：
@@ -100,8 +101,7 @@ export function LocalAccountsModal({
   };
 
   return (
-    <div className="modal-mask" onClick={onClose}>
-      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+    <Dialog label="导入本机账号" className="wide" onClose={onClose}>
         <h2>导入本机账号</h2>
         <p className="hint">
           WorkBuddy 登录后会把账号与凭证写到本机
@@ -167,8 +167,7 @@ export function LocalAccountsModal({
             {importing ? "导入中…" : `全部导入（${pending.length}）`}
           </button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -231,8 +230,7 @@ export function OAuthModal({
   };
 
   return (
-    <div className="modal-mask" onClick={onClose}>
-      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+    <Dialog label="登录新账号" className="wide" onClose={onClose}>
         <h2>登录新账号</h2>
         {/* key 让面板在探测到默认域后重建，避免内部 host 状态停留在初始值 */}
         <OAuthPanel
@@ -243,8 +241,7 @@ export function OAuthModal({
           onToast={onToast}
           onDone={onClose}
         />
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

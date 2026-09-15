@@ -10,6 +10,9 @@ import {
 } from "../api";
 import { maskPhone } from "../common";
 import type { ConfirmReq, Toast } from "../common";
+import { IconInfo } from "../components/Icons";
+import { Row, Toggle } from "../components/SettingsControls";
+import { Dialog } from "../components/Dialog";
 
 /** 事件类型 → 界面标签与配色 */
 function eventKind(e: JournalEvent): {
@@ -88,6 +91,9 @@ export function TakeoverPage({
   const [fmBusy, setFmBusy] = useState(false);
   // 限流切换模型勾选：用户额外启用的付费模型（免费模型恒生效，不进这里）
   const [rlModels, setRlModels] = useState<string[]>(settings.rate_limit_models);
+  // 「限流时在同一会话内换号」：与模型清单同一个弹窗、同样草稿制（点「保存」才落库）
+  const [rlFailover, setRlFailover] = useState(settings.failover_on_rate_limit);
+  const [mdlFailover, setMdlFailover] = useState<boolean | null>(null);
 
   const allIds = useMemo(() => accounts.map((a) => a.id), [accounts]);
   /** 实际生效的勾选集：未指定时视为全选 */
@@ -172,8 +178,16 @@ export function TakeoverPage({
   /** 打开「限流切换模型」弹窗：草稿复制当前生效值，模型清单缺失则先拉取 */
   const openModelPicker = () => {
     setMdlDraft(rlModels);
+    setMdlFailover(rlFailover);
     setMdlOpen(true);
     if (!fm) void loadFreeModels(false);
+  };
+
+  /** 关掉弹窗并丢弃全部草稿（点遮罩 / 点「取消」共用一个出口，避免只清一半草稿） */
+  const closeModelPicker = () => {
+    setMdlDraft(null);
+    setMdlFailover(null);
+    setMdlOpen(false);
   };
 
   /** 组装一份以当前界面状态为准的设置 */
@@ -245,22 +259,25 @@ export function TakeoverPage({
     }
   };
 
-  /** 限流切换弹框「保存」：草稿落库立即生效（纯模型白名单，不需要重启） */
+  /** 限流切换弹框「保存」：草稿落库立即生效（纯模型白名单 + 换号开关，不需要重启） */
   const doSaveModels = async () => {
     if (mdlDraft == null) return;
+    const failover = mdlFailover ?? rlFailover;
     setBusy(true);
     setErr("");
     try {
       const saved = await saveSettings(
-        snapshot({ rate_limit_models: mdlDraft })
+        snapshot({ rate_limit_models: mdlDraft, failover_on_rate_limit: failover })
       );
       onSettings(saved);
       setRlModels(mdlDraft);
+      setRlFailover(failover);
       setMdlDraft(null);
+      setMdlFailover(null);
       setMdlOpen(false);
-      onToast({ kind: "ok", text: "限流切换模型已生效" });
+      onToast({ kind: "ok", text: "限流切换设置已生效" });
     } catch (e) {
-      onToast({ kind: "err", text: "保存限流模型失败：" + String(e) });
+      onToast({ kind: "err", text: "保存限流设置失败：" + String(e) });
     } finally {
       setBusy(false);
     }
@@ -285,14 +302,19 @@ export function TakeoverPage({
       ? `全部 ${accounts.length} 个（默认）`
       : `已选 ${billing.length} · 未选 ${accounts.length - billing.length}`;
 
-  /** 限流切换摘要（控制条上的胶囊按钮）：免费模型恒生效，付费模型按勾选数 */
+  /**
+   * 限流切换摘要（控制条上的胶囊按钮）：免费模型恒生效，付费模型按勾选数。
+   * 关掉「会话内换号」时补一个后缀——那是一个会改变 429 行为的关键状态，
+   * 不该只藏在弹窗里。
+   */
   const freeCount = fm?.models.filter((m) => m.free).length ?? 0;
   const modelSummary =
     fm == null
       ? "加载中…"
-      : rlModels.length === 0
-      ? `${freeCount} 个免费（默认）`
-      : `${freeCount} 免费 · 付费 ${rlModels.length}`;
+      : (rlModels.length === 0
+          ? `${freeCount} 个免费（默认）`
+          : `${freeCount} 免费 · 付费 ${rlModels.length}`) +
+        (rlFailover ? "" : " · 不换号");
 
   /** 状态副文案 */
   const stateText = live
@@ -306,6 +328,7 @@ export function TakeoverPage({
   /**
    * 连续相同（类型 + 内容都一样）的事件聚合为一条，附重复次数。
    * 事件流是「新的在前」，相邻即时间连续——重启风暴、心跳重复这类刷屏只会占一行。
+   * 不再截断末尾：后端已把日志限定在「一次接管会话」内，整段历史都值得看。
    */
   const groupedEvents = useMemo(() => {
     const out: { e: JournalEvent; count: number }[] = [];
@@ -317,7 +340,7 @@ export function TakeoverPage({
         out.push({ e, count: 1 });
       }
     }
-    return out.slice(0, 80);
+    return out;
   }, [events]);
 
   /** 弹框内按用户名 / 手机号过滤 */
@@ -335,8 +358,14 @@ export function TakeoverPage({
 
   return (
     <section className="panel-page tk-page">
+      <p className="set-intro">
+        <IconInfo size={14} />
+        开启后 WorkBuddy 的对话请求由本地代理转发，按「积分最早过期优先」在账号间分配扣费；
+        下方记录每一次开关、路由与异常。
+      </p>
+
       {/* ── 紧凑控制条：开关 + 状态 + 扣费账号 / 限流切换（弹窗入口）+ 端口 ── */}
-      <div className={`tk-bar ${live ? "live" : ""}`}>
+      <div className={`card tk-bar ${live ? "live" : ""}`}>
         <label
           className="switch"
           title="开启后 WorkBuddy 的对话请求将由本地代理分流扣费"
@@ -398,10 +427,12 @@ export function TakeoverPage({
       {err && <p className="form-err">{err}</p>}
 
       {/* ── 接管动态：铺满剩余空间，列表内部滚动（滚动条隐藏） ── */}
-      <div className="tk-section tk-feed">
-        <div className="tk-sec-head">
+      <div className="card tk-feed">
+        <div className="card-head">
           <h3>接管动态</h3>
-          <span className="tk-sec-meta">开启 / 关闭 / 每个会话开始用哪个账号 / 异常</span>
+          <span className="card-head-sub">
+            开启 / 关闭 / 每个会话用哪个账号 / 异常。开启接管时自动重置，本轮记录不会丢
+          </span>
           <span className="spacer" />
           <button
             className="btn small ghost"
@@ -447,15 +478,14 @@ export function TakeoverPage({
 
       {/* ── 扣费账号选择弹框（草稿制：点「保存」才生效） ── */}
       {pickerOpen && (
-        <div
-          className="modal-mask"
-          onClick={() => {
+        <Dialog
+          label="选择扣费账号"
+          onClose={() => {
             setDraft(null);
             setPickerOpen(false);
           }}
         >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>选择扣费账号</h2>
+          <h2>选择扣费账号</h2>
             <p className="hint">
               勾选的账号才允许被扣费（会话粘滞 + 积分最早过期优先轮换），未勾选的账号会被排除；
               默认全部勾选（智能轮换）。点「保存」立即生效，无需重启。
@@ -520,27 +550,30 @@ export function TakeoverPage({
                 {busy ? "保存中…" : "保存"}
               </button>
             </div>
-          </div>
-        </div>
+        </Dialog>
       )}
 
       {/* ── 限流切换模型弹框（草稿制：点「保存」才生效） ── */}
       {mdlOpen && (
-        <div
-          className="modal-mask"
-          onClick={() => {
-            setMdlDraft(null);
-            setMdlOpen(false);
-          }}
-        >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>限流切换模型</h2>
+        <Dialog label="限流切换" onClose={closeModelPicker}>
+          <h2>限流切换</h2>
             <p className="hint">
               选中的模型触发限流（429）时，代理会将该账号冷却 10 分钟、自动换备用账号重发同一请求，对话完全无感；
               换号按「积分最早过期」优先（先消耗快过期的额度）。
               0 积分（免费）模型默认全部生效、不可取消；付费模型勾选后同样生效。
               模型列表从网关动态拉取（缓存 1 小时），腾讯增删模型后点「刷新」即可同步。
             </p>
+            <Row
+              title="限流时在同一会话内换号"
+              desc="关掉后 429 原样透传给客户端，不冷却、不换号——同一会话自始至终只用一个账号。风控视角下「一个会话中途换凭证」是极高异常值，代价是这种情况要等上游自己解除限流。"
+              ctrl={
+                <Toggle
+                  checked={mdlFailover ?? rlFailover}
+                  onChange={setMdlFailover}
+                  title="会话内不换号 = 调用凭证稳定"
+                />
+              }
+            />
             {fm && (
               <p className="hint fm-source">
                 {fm.source === "fetched"
@@ -599,13 +632,7 @@ export function TakeoverPage({
                 {fmBusy ? "刷新中…" : "刷新"}
               </button>
               <span className="spacer" />
-              <button
-                className="btn"
-                onClick={() => {
-                  setMdlDraft(null);
-                  setMdlOpen(false);
-                }}
-              >
+              <button className="btn" onClick={closeModelPicker}>
                 取消
               </button>
               <button
@@ -616,8 +643,7 @@ export function TakeoverPage({
                 {busy ? "保存中…" : "保存"}
               </button>
             </div>
-          </div>
-        </div>
+        </Dialog>
       )}
     </section>
   );

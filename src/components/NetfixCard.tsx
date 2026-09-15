@@ -84,7 +84,7 @@ export function NetfixCard({
   }, []);
 
   return (
-    <div className="set-card">
+    <div className="set-card card">
       <div className="set-card-head">
         <span className="set-card-icon">
           <IconActivity size={20} />

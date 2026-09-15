@@ -7,6 +7,7 @@ import {
   IconCalendar,
   IconShield,
   IconBell,
+  IconActivity,
   IconCheck,
   IconAlertTriangle,
   IconInfo,
@@ -48,13 +49,27 @@ export function SettingsPage({
   const [auto, setAuto] = useState(settings.auto_checkin_on_start);
   const [schedOn, setSchedOn] = useState(settings.schedule_enabled);
   const [schedTime, setSchedTime] = useState(settings.schedule_time);
+  // 定时签到的随机时间窗（分钟）：0 = 关闭随机，精确到设定时刻
+  const [schedWindow, setSchedWindow] = useState(
+    String(settings.schedule_window_minutes)
+  );
   const [notifyOn, setNotifyOn] = useState(settings.notify_enabled);
   const [webhook, setWebhook] = useState(settings.notify_webhook);
   const [notifySched, setNotifySched] = useState(settings.notify_on_schedule);
   const [notifyManual, setNotifyManual] = useState(settings.notify_on_manual);
+  // 积分日报：每天定时结算「消耗 / 新增」；推送复用上面那套通知总开关与 webhook
+  const [reportOn, setReportOn] = useState(settings.report_enabled);
+  const [reportTime, setReportTime] = useState(settings.report_time);
+  const [notifyReport, setNotifyReport] = useState(settings.notify_on_report);
   // 多账号风控：批量签到时账号之间随机歇几秒，避免同 IP 瞬时连发
   const [staggerOn, setStaggerOn] = useState(settings.stagger_checkin);
   const [staggerMax, setStaggerMax] = useState(String(settings.stagger_max_seconds));
+  // 顺序打散 + 手动路径节流：前者抹掉「固定先后」，后者堵住「点一下就连发」这个缺口
+  const [shuffle, setShuffle] = useState(settings.shuffle_checkin_order);
+  const [manualStagger, setManualStagger] = useState(settings.manual_stagger);
+  const [manualMax, setManualMax] = useState(
+    String(settings.manual_stagger_max_seconds)
+  );
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -153,14 +168,14 @@ export function SettingsPage({
   const dl = downloadProgress(updateStatus);
 
   return (
-    <section className="panel-page set-page">
+    <section className="panel-page">
       <p className="set-intro">
         <IconInfo size={14} />
         定时签到、多账号风控、签到通知、应用更新与网络急救。智能接管相关配置请在「智能接管」页调整。
       </p>
 
       {/* 签到自动化 */}
-      <div className="set-card">
+      <div className="set-card card">
         <div className="set-card-head">
           <span className="set-card-icon">
             <IconCalendar size={20} />
@@ -202,7 +217,7 @@ export function SettingsPage({
             <Row
               sub
               title="签到时刻"
-              desc="24 小时制。应用运行期间触发；错过时刻后 30 分钟内打开会自动补签。"
+              desc="24 小时制，作为时间窗的起点。应用运行期间触发；错过时刻后 30 分钟内打开会自动补签。"
               ctrl={
                 <input
                   type="time"
@@ -213,6 +228,31 @@ export function SettingsPage({
                     patch({ schedule_time: v.trim() });
                   }}
                 />
+              }
+            />
+          )}
+          {schedOn && (
+            <Row
+              sub
+              title="随机时间窗"
+              desc="在该时刻之后的这段时间内随机挑一分钟触发，当天挑定后不再变。固定在同一分钟触发是脚本最好认的特征；填 0 则精确到设定时刻。"
+              ctrl={
+                <>
+                  <input
+                    type="number"
+                    value={schedWindow}
+                    min={0}
+                    max={720}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setSchedWindow(v);
+                      // 空串按 0（=关闭随机）处理，别用 || 落到默认值上把随机又打开
+                      const n = Math.min(720, Math.max(0, Number(v) || 0));
+                      patch({ schedule_window_minutes: n });
+                    }}
+                  />
+                  <span className="set-suffix">分钟</span>
+                </>
               }
             />
           )}
@@ -242,7 +282,7 @@ export function SettingsPage({
       </div>
 
       {/* 多账号风控 */}
-      <div className="set-card">
+      <div className="set-card card">
         <div className="set-card-head">
           <span className="set-card-icon">
             <IconShield size={20} />
@@ -289,11 +329,60 @@ export function SettingsPage({
               }
             />
           )}
+          <Row
+            title="随机打乱签到顺序"
+            desc="每次批量签到都随机决定先后。固定按列表顺序连发，等于把「同一批账号」直接写进请求序列；打乱只影响发请求的次序，列表顺序不变。"
+            ctrl={
+              <Toggle
+                checked={shuffle}
+                onChange={(v) => {
+                  setShuffle(v);
+                  patch({ shuffle_checkin_order: v });
+                }}
+              />
+            }
+          />
+          <Row
+            title="手动「全部签到」也加间隔"
+            desc="手动点击同样不该瞬时连发——过去手动路径是全程唯一没有节流的入口，风控看到的恰好就是那几秒内完成的一串签到。"
+            ctrl={
+              <Toggle
+                checked={manualStagger}
+                onChange={(v) => {
+                  setManualStagger(v);
+                  patch({ manual_stagger: v });
+                }}
+              />
+            }
+          />
+          {manualStagger && (
+            <Row
+              sub
+              title="手动间隔上限"
+              desc="手动签到时账号之间的随机等待不超过该秒数（2～600）。比自动签到短得多，避免点一次要等太久。"
+              ctrl={
+                <>
+                  <input
+                    type="number"
+                    value={manualMax}
+                    min={2}
+                    max={600}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setManualMax(v);
+                      patch({ manual_stagger_max_seconds: Number(v) || 8 });
+                    }}
+                  />
+                  <span className="set-suffix">秒</span>
+                </>
+              }
+            />
+          )}
         </div>
       </div>
 
       {/* 签到通知 */}
-      <div className="set-card">
+      <div className="set-card card">
         <div className="set-card-head">
           <span className="set-card-icon">
             <IconBell size={20} />
@@ -372,8 +461,67 @@ export function SettingsPage({
         </div>
       </div>
 
+      {/* 积分日报 */}
+      <div className="set-card card">
+        <div className="set-card-head">
+          <span className="set-card-icon">
+            <IconActivity size={20} />
+          </span>
+          <div>
+            <div className="set-card-title">积分日报</div>
+            <div className="set-card-sub">每天结算一次消耗与新增</div>
+          </div>
+        </div>
+        <div className="set-group">
+          <Row
+            title="开启每日积分日报"
+            desc="到点结算「上次结算到现在」的消耗与新增，并按账号记录明细。口径是资源包累计量的差值，所以多个客户端同时消耗也都能统计到。应用未运行时不结算，下次会把这段空档一并算进来。"
+            ctrl={
+              <Toggle
+                checked={reportOn}
+                onChange={(v) => {
+                  setReportOn(v);
+                  patch({ report_enabled: v });
+                }}
+              />
+            }
+          />
+          {reportOn && (
+            <Row
+              sub
+              title="结算时刻"
+              desc="24 小时制。应用运行期间才会触发；错过时刻后 30 分钟内打开会自动补结算。这个时刻就是统计窗口的边界，因此不做随机抖动——否则相邻两天的日报无法直接相加。"
+              ctrl={
+                <input
+                  type="time"
+                  value={reportTime}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setReportTime(v);
+                    patch({ report_time: v.trim() });
+                  }}
+                />
+              }
+            />
+          )}
+          <Row
+            title="结算后推送"
+            desc="把日报推到「签到通知」里配置的 webhook。通知总开关关着时不会推送，日报本身照常记录。"
+            ctrl={
+              <Toggle
+                checked={notifyReport}
+                onChange={(v) => {
+                  setNotifyReport(v);
+                  patch({ notify_on_report: v });
+                }}
+              />
+            }
+          />
+        </div>
+      </div>
+
       {/* 应用更新 */}
-      <div className="set-card">
+      <div className="set-card card">
         <div className="set-card-head">
           <span className="set-card-icon">
             <IconDownload size={20} />

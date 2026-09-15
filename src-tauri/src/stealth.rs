@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -39,8 +40,6 @@ const LEASE_FILE: &str = "stealth.json";
 /// 注入 process.env，但删除配置键时不会清掉旧值。日志记录 install / proxy_request /
 /// uninstall / restart，用于判断端点已摘除后是否仍存在缓存旧地址的 CLI host。
 const JOURNAL_FILE: &str = "takeover-journal.jsonl";
-/// 只留最近这么多条：诊断只需要时间线，不需要考古
-const JOURNAL_MAX: usize = 200;
 
 /// 一条接管事件
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -58,57 +57,108 @@ pub fn journal_path(data_dir: &Path) -> PathBuf {
     data_dir.join(JOURNAL_FILE)
 }
 
-/// 追加是「整文件 read-modify-write」，多个连接线程并发写会互相覆盖（后写的 rename
-/// 直接抹掉前一条），而这份日志恰好是排查接管问题**唯一的**证据源。用一把进程内锁
-/// 把追加串行化：日志只可能少写（静默失败），但绝不能因为并发而丢事件。
+/// 追加是串行的纯追加。取锁只为把并发写排成队——代理每个连接一个线程，而这份日志是
+/// 排查接管问题**唯一的**证据源，时间顺序乱了它就失去意义。
 static JOURNAL_LOCK: Mutex<()> = Mutex::new(());
+
+/// 锁被毒化（某线程持锁时 panic）不能成为丢日志的理由：诊断代码必须比它诊断的
+/// 那条路径更能扛。
+fn lock_journal() -> std::sync::MutexGuard<'static, ()> {
+    JOURNAL_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub fn journal_read(data_dir: &Path) -> Vec<JournalEvent> {
     read_events(data_dir)
 }
 
-/// 不加锁的读：只读路径不必阻塞，且 `rename` 是原子的，读者只会看到完整的新旧版本之一。
+/// 不加锁的读。只解析**以换行结束**的完整行：末尾没有换行 = 某次写入还在途中
+/// （或崩在半路），跳过它，别把「还没写完」当成「一条坏记录」。
 fn read_events(data_dir: &Path) -> Vec<JournalEvent> {
     let Ok(text) = fs::read_to_string(journal_path(data_dir)) else {
         return Vec::new();
     };
-    text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    // 纯追加下读者可能正好撞上一次写：只认到最后一个换行为止
+    let Some(end) = text.rfind('\n') else {
+        return Vec::new();
+    };
+    text[..=end]
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
-/// 追加一条事件。失败一律静默：日志是诊断辅助，绝不能反过来影响接管本身。
-pub fn journal_append(data_dir: &Path, event: &str, detail: &str) {
-    let e = JournalEvent {
+fn make_event(event: &str, detail: &str) -> JournalEvent {
+    JournalEvent {
         at_ms: now_ms(),
         at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         event: event.to_string(),
         detail: detail.to_string(),
-    };
-    // 锁被毒化（某线程持锁时 panic）不能成为丢日志的理由：诊断代码必须比它诊断的
-    // 那条路径更能扛。
-    let _guard = JOURNAL_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let mut all = read_events(data_dir);
-    all.push(e);
-    if all.len() > JOURNAL_MAX {
-        let drop = all.len() - JOURNAL_MAX;
-        all.drain(..drop);
     }
-    let body: String = all
+}
+
+/// 追加一条事件。失败一律静默：日志是诊断辅助，绝不能反过来影响接管本身。
+///
+/// **不设条数上限**。曾经的「只留最近 200 条」会让 `proxy_request` 这类高频内部证据
+/// 把真正要看的事件挤出窗口，表现成「接管动态自己清空了」。改为把日志与**一次接管
+/// 会话**绑定：开启接管时整份重置（见 [`journal_append_reset`]），会话之内一条不丢。
+pub fn journal_append(data_dir: &Path, event: &str, detail: &str) {
+    write_events(data_dir, &[make_event(event, detail)], false);
+}
+
+/// 同 [`journal_append`]，但**先丢弃全部历史**。
+///
+/// 用在「开启接管」这一刻：日志描述的就是本轮会话，上一轮的话题已经结束。
+pub fn journal_append_reset(data_dir: &Path, event: &str, detail: &str) {
+    write_events(data_dir, &[make_event(event, detail)], true);
+}
+
+/// 落盘。`truncate = true` 先清空历史，否则纯追加。
+///
+/// 用纯追加而非「读全量 → 改 → 整体重写」：取消上限之后，后者每次追加的代价随文件
+/// 长度线性增长（还附带一遍全量 JSON 解析），长会话会把每个反代请求越拖越慢。追加是
+/// O(1)，顺带还绕开了 Windows 上 `rename` 会因文件被展示层占用而失败的问题。
+fn write_events(data_dir: &Path, events: &[JournalEvent], truncate: bool) {
+    let body: String = events
         .iter()
         .filter_map(|e| serde_json::to_string(e).ok())
         .map(|l| format!("{l}\n"))
         .collect();
-    let target = journal_path(data_dir);
+    if body.is_empty() {
+        return;
+    }
+    let _guard = lock_journal();
     if fs::create_dir_all(data_dir).is_err() {
         return;
     }
-    let tmp = data_dir.join(format!("{JOURNAL_FILE}.tmp"));
-    if fs::write(&tmp, &body).is_ok() && fs::rename(&tmp, &target).is_ok() {
-        return;
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).read(true).write(true);
+    if truncate {
+        opts.truncate(true);
+    } else {
+        opts.append(true);
     }
-    // Windows 上 rename 会因目标文件被占用（如展示层正在读）而失败；此时退化成直写，
-    // 宁可短暂失去原子性，也不能把这条证据丢掉。
-    let _ = fs::write(&target, &body);
+    let Ok(mut f) = opts.open(journal_path(data_dir)) else {
+        return;
+    };
+    if !truncate && !is_clean_tail(&mut f) {
+        // 上次崩在写入途中会留下一条没有换行的残句；先补一个换行把它隔开，否则新记录
+        // 会粘在残句后面，一起变成坏行（然后一起被丢掉）。
+        let _ = f.write_all(b"\n");
+    }
+    // 一次 write_all 写完整条：单条记录远小于一个扇区，读者不会看到半条
+    let _ = f.write_all(body.as_bytes());
+}
+
+/// 文件是否为空、或以换行结尾（空文件视为「干净」，无需补换行）。
+fn is_clean_tail(f: &mut fs::File) -> bool {
+    let Ok(len) = f.metadata().map(|m| m.len()) else {
+        return true;
+    };
+    if len == 0 {
+        return true;
+    }
+    let mut b = [0u8; 1];
+    f.seek(SeekFrom::End(-1)).is_ok() && f.read_exact(&mut b).is_ok() && b[0] == b'\n'
 }
 
 /// 接管租约。落在**本应用**的数据目录里，不进 WorkBuddy 的配置。
@@ -270,10 +320,18 @@ pub fn install(home: &Path, data_dir: &Path, port: u16) -> Result<(), String> {
     // 事件里带上扣费备选名单，界面时间线能直接回答「开启时当前账号池是什么」
     let settings = crate::accounts::load_settings(data_dir);
     let names = billing_account_names(data_dir, &settings.billing_account_ids);
-    journal_append(
+    // 开启接管 = 新的一轮会话，日志随之重置；顺手把「清掉了上一轮多少条」写进第一条
+    // 事件里，界面上那句「以前的动态怎么没了」就地有答案
+    let cleared = journal_read(data_dir).len();
+    let note = if cleared > 0 {
+        format!("；已清空上一轮动态 {cleared} 条")
+    } else {
+        String::new()
+    };
+    journal_append_reset(
         data_dir,
         "install",
-        &format!("接管已开启：端点写入 env.{ENV_KEY}={url}；扣费备选：{names}"),
+        &format!("接管已开启：端点写入 env.{ENV_KEY}={url}；扣费备选：{names}{note}"),
     );
     Ok(())
 }
@@ -472,6 +530,8 @@ fn merge_install_restart(events: Vec<JournalEvent>) -> Vec<JournalEvent> {
 #[tauri::command]
 pub fn takeover_events_clear(app: tauri::AppHandle) -> Result<(), String> {
     let dir = crate::commands::try_data_dir(&app)?;
+    // 与追加共用一把锁：否则「清空」和并发写入可能交叉，留下半条记录
+    let _guard = lock_journal();
     let path = journal_path(&dir);
     if path.exists() {
         fs::write(&path, "").map_err(|e| format!("清空接管动态失败：{e}"))?;
@@ -673,15 +733,82 @@ mod tests {
         assert_eq!(reordered.len(), 2);
     }
 
+    /// 不设上限：会话内的历史必须一条不丢。
+    ///
+    /// 旧实现只留 200 条，而 `proxy_request` 是**每个模型请求一条**、界面又不显示它，
+    /// 于是「看得见的事件」会被它成批挤出去 —— 用户看到的就是「接管动态自己清空了」。
     #[test]
-    fn journal_caps_length_and_keeps_latest() {
+    fn journal_keeps_every_entry_without_a_cap() {
         let (home, data) = sandbox();
-        for i in 0..(JOURNAL_MAX + 10) {
+        let n = 512;
+        for i in 0..n {
             journal_append(&data, "install", &format!("e{i}"));
         }
         let all = journal_read(&data);
-        assert_eq!(all.len(), JOURNAL_MAX);
-        assert_eq!(all.last().unwrap().detail, format!("e{}", JOURNAL_MAX + 9));
+        assert_eq!(all.len(), n, "不应再有任何裁剪");
+        assert_eq!(all[0].detail, "e0", "最旧的必须还在，且顺序不变");
+        assert_eq!(all[n - 1].detail, format!("e{}", n - 1));
+
+        let _ = fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// 开启接管 = 新的一轮会话：历史整体重置，文件里只剩这一条 install。
+    #[test]
+    fn install_starts_a_fresh_journal() {
+        let (home, data) = sandbox();
+        journal_append(&data, "route_start", "上一轮：使用账号 A");
+        journal_append(&data, "uninstall", "上一轮：接管已关闭");
+        assert_eq!(journal_read(&data).len(), 2);
+
+        install(&home, &data, 8787).unwrap();
+        let events = journal_read(&data);
+        assert_eq!(events.len(), 1, "开启接管应清空历史：{events:?}");
+        assert_eq!(events[0].event, "install");
+        assert!(
+            events[0].detail.contains("已清空上一轮动态 2 条"),
+            "首条事件要说明清掉了什么：{}",
+            events[0].detail
+        );
+        assert!(events[0].detail.contains("8787"));
+
+        let _ = fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// 幂等 install（端口没变）不是新会话，不能把本轮会话里的记录抹掉。
+    /// 应用重启得足够快时租约还新鲜，走的就是这条早返回路径。
+    #[test]
+    fn idempotent_reinstall_keeps_the_current_session() {
+        let (home, data) = sandbox();
+        install(&home, &data, 8787).unwrap();
+        journal_append(&data, "route_start", "本轮：使用账号 A");
+        install(&home, &data, 8787).unwrap();
+        let events = journal_read(&data);
+        assert_eq!(
+            events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+            vec!["install", "route_start"],
+            "重复 install 不该重置日志：{events:?}"
+        );
+
+        let _ = fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// 纯追加下，半条记录（写在途中 / 崩在半路）不算一条。
+    /// 而且它必须被隔开——否则**下一条**会粘在它后面一起变成坏行、一起丢掉。
+    #[test]
+    fn journal_tolerates_a_half_written_tail() {
+        let (home, data) = sandbox();
+        journal_append(&data, "install", "完整的一条");
+        let path = journal_path(&data);
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("{\"at_ms\":1,\"at\":\"\",\"event\":\"inst");
+        fs::write(&path, text).unwrap();
+
+        assert_eq!(journal_read(&data).len(), 1, "没写完的那条不进时间线");
+
+        journal_append(&data, "route_start", "后续照常追加");
+        let all = journal_read(&data);
+        assert_eq!(all.len(), 2, "残句不该吞掉后来的记录：{all:?}");
+        assert_eq!(all[1].detail, "后续照常追加");
 
         let _ = fs::remove_dir_all(home.parent().unwrap());
     }
@@ -696,8 +823,8 @@ mod tests {
         let (home, data) = sandbox();
         let data = Arc::new(data);
         let threads = 8usize;
-        // 8 × 25 = 200 == JOURNAL_MAX：正好卡在不触发裁剪的上限，任何一条丢失都会暴露
-        let per_thread = JOURNAL_MAX / threads;
+        // 取消上限后没有「裁剪边界」可卡了，这里纯粹验证并发追加一条不丢
+        let per_thread = 40usize;
 
         let handles: Vec<_> = (0..threads)
             .map(|t| {

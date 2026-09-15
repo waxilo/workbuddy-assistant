@@ -1,0 +1,199 @@
+/**
+ * 基础层：重置、环境背景、排版、焦点、动效关键帧。
+ *
+ * 毛玻璃的前置条件是「背后有东西」——所以这里把纯色底换成了柔和的环境光
+ * （三团低透明度径向渐变 + 一层竖向提亮）。没有这层，backdrop-filter 只是
+ * 半透明，看不出玻璃感。
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  color: var(--text);
+  font-size: var(--fs-cell);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* 环境光：位置刻意避开内容中心，避免读写区被染色影响对比度 */
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(920px 620px at 8% -12%, rgba(59, 108, 255, 0.16), transparent 62%),
+    radial-gradient(760px 520px at 96% 2%, rgba(122, 92, 255, 0.11), transparent 64%),
+    radial-gradient(700px 500px at 74% 108%, rgba(46, 163, 107, 0.1), transparent 62%),
+    linear-gradient(180deg, #f8fafd 0%, #eef2f9 100%);
+  background-repeat: no-repeat;
+  overflow: hidden;
+}
+
+::selection {
+  background: var(--primary-soft-2);
+  color: var(--primary-d);
+}
+
+/* 键盘可达性：只在键盘导航时显示焦点环，鼠标点击不显示。
+   注意这里**不设 border-radius** —— 它是全局选择器，设了就会在聚焦瞬间
+   把卡片（12px）/ 弹窗（16px）的圆角改掉，属于"看起来只是加了个描边"的隐性破相。 */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* 滚动条：与整体圆角/低对比语言一致（列表类区域另有「隐藏滚动条」的显式规则） */
+.content::-webkit-scrollbar,
+.modal-body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.content::-webkit-scrollbar-thumb,
+.modal-body::-webkit-scrollbar-thumb {
+  background: rgba(107, 116, 136, 0.28);
+  border: 3px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: content-box;
+}
+.content::-webkit-scrollbar-thumb:hover,
+.modal-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 116, 136, 0.45);
+  background-clip: content-box;
+}
+.content::-webkit-scrollbar-track,
+.modal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 关键帧：全应用共用的动效词汇表 ─────────────────────────── */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px var(--primary-ring);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(59, 108, 255, 0);
+  }
+}
+@keyframes nav-dot-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.55;
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+@keyframes upd-slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+/* 页面入场：轻微上浮。四页共用，靠 nth-child 做 40ms 递进 */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 遮罩淡入 */
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* 弹窗落定：略带回弹，比线性缩放更有「落下来」的物理感 */
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 内容块出现（列表项、提示块） */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 页面入场节奏：面板页的直接子块依次浮现。
+   刻意用 animation-delay 而不是把 JS 写进每个组件 —— 页面自己不用知道这事。 */
+.panel-page > * {
+  animation: rise var(--dur-3) var(--ease-out) both;
+}
+.panel-page > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.panel-page > *:nth-child(2) {
+  animation-delay: 40ms;
+}
+.panel-page > *:nth-child(3) {
+  animation-delay: 80ms;
+}
+.panel-page > *:nth-child(4) {
+  animation-delay: 120ms;
+}
+.panel-page > *:nth-child(5) {
+  animation-delay: 160ms;
+}
+.panel-page > *:nth-child(n + 6) {
+  animation-delay: 200ms;
+}
+
+/**
+ * 无障碍：尊重系统的「减少动态效果」。
+ * 用一条近乎全局的规则把动画与过渡压到 0.01ms —— 比逐个去禁用可靠得多，
+ * 新增动画也不会漏掉。历史版本全站 7 处动画，一处降级都没有。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,7 +1,13 @@
 import { useEffect } from "react";
 import type { ConfirmReq } from "../common";
+import { Dialog } from "./Dialog";
 
-/** 自研确认框：替代 window.confirm（Tauri 的 WKWebView 不支持原生 confirm 面板） */
+/**
+ * 自研确认框：替代 window.confirm（Tauri 的 WKWebView 不支持原生 confirm 面板）。
+ *
+ * 遮罩、Esc 关闭、dialog 语义与滚动锁都交给 Dialog —— 这里只额外负责
+ * 「Enter 确认」，因为那是确认框独有的语义（普通弹窗按 Enter 不该提交）。
+ */
 export function ConfirmDialog({
   req,
   onDone,
@@ -11,7 +17,6 @@ export function ConfirmDialog({
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onDone(false);
       if (e.key === "Enter") onDone(true);
     };
     window.addEventListener("keydown", onKey);
@@ -19,22 +24,25 @@ export function ConfirmDialog({
   }, [onDone]);
 
   return (
-    <div className="modal-mask confirm-mask" onClick={() => onDone(false)}>
-      <div className="modal confirm" onClick={(e) => e.stopPropagation()}>
-        <h2>{req.title}</h2>
-        {req.body && <p className="confirm-body">{req.body}</p>}
-        <div className="modal-actions">
-          <button className="btn ghost" autoFocus onClick={() => onDone(false)}>
-            取消
-          </button>
-          <button
-            className={req.danger ? "btn danger" : "btn primary"}
-            onClick={() => onDone(true)}
-          >
-            {req.okText ?? "确定"}
-          </button>
-        </div>
+    <Dialog
+      label={req.title}
+      className="confirm"
+      maskClassName="confirm-mask"
+      onClose={() => onDone(false)}
+    >
+      <h2>{req.title}</h2>
+      {req.body && <p className="confirm-body">{req.body}</p>}
+      <div className="modal-actions">
+        <button className="btn ghost" autoFocus onClick={() => onDone(false)}>
+          取消
+        </button>
+        <button
+          className={req.danger ? "btn danger" : "btn primary"}
+          onClick={() => onDone(true)}
+        >
+          {req.okText ?? "确定"}
+        </button>
       </div>
-    </div>
+    </Dialog>
   );
 }

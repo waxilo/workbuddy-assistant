@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Account, CheckinLog } from "../types";
 import { clearCheckinLogs, getCheckinLogs } from "../api";
-import { LogBadge, accountLabel, formatCredits } from "../common";
+import {
+  AccountCell,
+  EmptyState,
+  StatusDot,
+  accountLabel,
+  formatCredits,
+  logStatus,
+} from "../common";
 import type { ConfirmReq, Toast } from "../common";
 import { IconTrash, IconList } from "../components/Icons";
 
@@ -9,6 +16,11 @@ import { IconTrash, IconList } from "../components/Icons";
  * 「签到日志」页：按时间倒序列出全部记录，可按账号筛选。
  *
  * 从账号条目跳进来时默认锁定该账号；作为整页后也可以随时切换查看范围。
+ *
+ * 展示层刻意与「账号签到」页共用同一套语言：账号列走 common 的 AccountCell
+ * （头像 + 名称 + 手机号），结果列走 StatusDot（圆点 + 文字），表格骨架走
+ * 通用的 .data-table。这些此前都是本页自己的一套（纯文字拼接 + 实心胶囊 +
+ * 灰底紧凑表头），同一个概念在两页长得不一样。
  */
 export function LogsPage({
   accounts,
@@ -38,9 +50,31 @@ export function LogsPage({
     refresh();
   }, [refresh]);
 
+  /** 清空当前筛选范围内的日志（不可恢复） */
+  const doClear = async () => {
+    const acc = accounts.find((a) => a.id === accountId);
+    const ok = await askConfirm({
+      title: "清空日志",
+      body: acc
+        ? `确认清空「${accountLabel(acc.name, acc.phone)}」的全部签到日志？`
+        : "确认清空全部签到日志？",
+      okText: "清空",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await clearCheckinLogs(accountId || undefined);
+      onToast({ kind: "ok", text: "日志已清空" });
+      refresh();
+    } catch (e) {
+      onToast({ kind: "err", text: "清空失败：" + String(e) });
+    }
+  };
+
   return (
-    <section className="panel-page logs-page">
-      <div className="logs-toolbar">
+    <section className="panel-page">
+      {/* 筛选与清空同属这一页的工具条，用与下方表格相同的卡片语言承载 */}
+      <div className="card logs-toolbar">
         <label className="filter">
           账号
           <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
@@ -53,33 +87,11 @@ export function LogsPage({
           </select>
         </label>
         <span className="spacer" />
+        <span className="count">{loading ? "加载中…" : `共 ${logs.length} 条`}</span>
         <button
           className="btn small danger"
           disabled={logs.length === 0}
-          onClick={async () => {
-            const acc = accounts.find((a) => a.id === accountId);
-            const tip = acc
-              ? {
-                  title: "清空日志",
-                  body: `确认清空「${accountLabel(acc.name, acc.phone)}」的全部签到日志？`,
-                  okText: "清空",
-                  danger: true,
-                }
-              : {
-                  title: "清空日志",
-                  body: "确认清空全部签到日志？",
-                  okText: "清空",
-                  danger: true,
-                };
-            if (!(await askConfirm(tip))) return;
-            try {
-              await clearCheckinLogs(accountId || undefined);
-              onToast({ kind: "ok", text: "日志已清空" });
-              refresh();
-            } catch (e) {
-              onToast({ kind: "err", text: "清空失败：" + String(e) });
-            }
-          }}
+          onClick={() => void doClear()}
         >
           <IconTrash size={15} />
           清空日志
@@ -89,14 +101,14 @@ export function LogsPage({
       {loading ? (
         <p className="empty">加载中…</p>
       ) : logs.length === 0 ? (
-        <div className="empty log-empty">
-          <IconList size={26} />
-          <span>暂无签到记录</span>
-          <span className="empty-sub">完成签到后，记录会按时间倒序显示在这里</span>
-        </div>
+        <EmptyState
+          icon={<IconList size={26} />}
+          title="暂无签到记录"
+          hint="完成签到后，记录会按时间倒序显示在这里"
+        />
       ) : (
-        <div className="log-table-wrap">
-          <table className="log-table">
+        <div className="table-wrap card">
+          <table className="data-table">
             <thead>
               <tr>
                 <th>账号</th>
@@ -108,24 +120,27 @@ export function LogsPage({
               </tr>
             </thead>
             <tbody>
-              {logs.map((l) => (
-                <tr key={l.id}>
-                  <td className="log-cell-name">
-                    {accountLabel(l.account_name, l.account_phone)}
-                  </td>
-                  <td>
-                    <LogBadge log={l} />
-                  </td>
-                  <td className="log-cell-time">{l.at}</td>
-                  <td className="num log-credit">
-                    {l.credit != null ? "+" + formatCredits(l.credit) : "—"}
-                  </td>
-                  <td className="num log-balance">
-                    {l.balance != null ? formatCredits(l.balance) : "—"}
-                  </td>
-                  <td className="log-cell-msg">{l.message || "—"}</td>
-                </tr>
-              ))}
+              {logs.map((l) => {
+                const st = logStatus(l);
+                return (
+                  <tr key={l.id}>
+                    <td>
+                      <AccountCell name={l.account_name} phone={l.account_phone} />
+                    </td>
+                    <td>
+                      <StatusDot tone={st.tone} label={st.label} />
+                    </td>
+                    <td className="log-cell-time">{l.at}</td>
+                    <td className="num log-credit">
+                      {l.credit != null ? "+" + formatCredits(l.credit) : "—"}
+                    </td>
+                    <td className="num log-balance">
+                      {l.balance != null ? formatCredits(l.balance) : "—"}
+                    </td>
+                    <td className="log-cell-msg">{l.message || "—"}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

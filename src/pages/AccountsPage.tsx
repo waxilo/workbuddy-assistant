@@ -1,14 +1,19 @@
 import type { Account } from "../types";
 import {
+  AccountCell,
+  EmptyState,
+  StatusDot,
   formatCredits,
-  maskPhone,
   relativeTime,
   signState,
   expiryInfo,
+  accountCredits,
+  totalCredits,
   type SignState,
 } from "../common";
 import { IconFile, IconTrash, IconUser, IconRefresh } from "../components/Icons";
 
+/** 账号签到状态 → 状态圆点文案（圆点本身的视觉由 common 的 StatusDot 统一提供） */
 const STATUS_LABEL: Record<SignState, string> = {
   signing: "签到中",
   done: "今日已签到",
@@ -16,15 +21,6 @@ const STATUS_LABEL: Record<SignState, string> = {
   fail: "签到失败",
   inactive: "活动未开",
 };
-
-function StatusDot({ state }: { state: SignState }) {
-  return (
-    <span className={`status-dot ${state}`}>
-      <i className="dot" />
-      <span>{STATUS_LABEL[state]}</span>
-    </span>
-  );
-}
 
 /**
  * 首页：账号列表 + 签到操作。
@@ -47,46 +43,51 @@ export function AccountsPage({
   onRemove: (a: Account) => void;
   onOpenLogs: (accountId: string) => void;
 }) {
-  if (loading) return <p className="empty">加载中…</p>;
+  if (loading)
+    return (
+      <section className="panel-page">
+        <p className="empty">加载中…</p>
+      </section>
+    );
   if (accounts.length === 0)
     return (
-      <div className="empty">
-        <p>还没有账号。</p>
-        <p>
-          点「登录新账号」用系统浏览器扫码登录，或点「导入本机账号」直接读取 WorkBuddy
-          写在本机的登录信息（自动带上昵称与手机号）。
-        </p>
-      </div>
+      <section className="panel-page">
+        <EmptyState
+          icon={<IconUser size={26} />}
+          title="还没有账号"
+          hint="点页头「登录新账号」用系统浏览器扫码登录，或点「导入本机账号」直接读取 WorkBuddy 写在本机的登录信息（自动带上昵称与手机号）。"
+        />
+      </section>
     );
 
   const total = accounts.length;
   const done = accounts.filter((a) => signState(a, false) === "done").length;
   const pending = total - done;
-  const rate = total > 0 ? Math.round((done / total) * 100) : 0;
+  const credits = totalCredits(accounts);
 
   return (
-    <div className="ac-page">
+    <section className="panel-page">
       <div className="summary">
-        <div className="sum-card">
+        <div className="sum-card card">
           <span className="sum-label">账号总数</span>
           <span className="sum-num">{total}</span>
         </div>
-        <div className="sum-card">
+        <div className="sum-card card">
           <span className="sum-label">今日已签到</span>
           <span className="sum-num ok">{done}</span>
         </div>
-        <div className="sum-card">
+        <div className="sum-card card">
           <span className="sum-label">待签到</span>
           <span className="sum-num">{pending}</span>
         </div>
-        <div className="sum-card">
-          <span className="sum-label">签到成功率</span>
-          <span className="sum-num">{rate}%</span>
+        <div className="sum-card card">
+          <span className="sum-label">总积分</span>
+          <span className="sum-num">{formatCredits(credits)}</span>
         </div>
       </div>
 
-      <div className="table-wrap">
-        <table className="account-table">
+      <div className="table-wrap card">
+        <table className="data-table">
           <thead>
             <tr>
               <th>账号</th>
@@ -101,24 +102,18 @@ export function AccountsPage({
             {accounts.map((a) => {
               const busy = busyIds.has(a.id);
               const st = signState(a, busy);
-              const low = a.last?.balance != null && a.last.balance < 100;
+              const bal = accountCredits(a);
+              const low = bal != null && bal < 100;
               const e = expiryInfo(a.credit_snapshot?.earliest_expiry_ms);
-              const initial = /^\d/.test(a.name) ? null : a.name.slice(0, 1);
               return (
-                <tr key={a.id} className="account-row">
-                  <td className="ac-cell-name">
-                    <span className="ac-avatar">
-                      {initial ? initial : <IconUser size={16} />}
-                    </span>
-                    <div className="ac-id">
-                      <span className="ac-name">{maskPhone(a.name)}</span>
-                      {a.phone && <span className="ac-phone">{maskPhone(a.phone)}</span>}
-                    </div>
+                <tr key={a.id}>
+                  <td>
+                    <AccountCell name={a.name} phone={a.phone} />
                   </td>
-                  <td className="ac-cell-balance">
-                    {a.last?.balance != null ? (
+                  <td className="num">
+                    {bal != null ? (
                       <span className={"ac-balance" + (low ? " low" : "")}>
-                        {formatCredits(a.last.balance)}
+                        {formatCredits(bal)}
                       </span>
                     ) : (
                       <span className="muted">—</span>
@@ -145,12 +140,12 @@ export function AccountsPage({
                       <span className="muted">—</span>
                     )}
                   </td>
-                  <td className="ac-cell-status">
-                    <StatusDot state={st} />
+                  <td>
+                    <StatusDot tone={st} label={STATUS_LABEL[st]} />
                   </td>
                   <td className="ac-cell-actions">
                     <button
-                      className="btn btn-sm btn-primary"
+                      className="btn small primary"
                       disabled={busy}
                       onClick={() => onCheckinOne(a.id)}
                     >
@@ -183,6 +178,6 @@ export function AccountsPage({
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
   );
 }
