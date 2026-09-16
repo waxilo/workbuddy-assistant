@@ -13,29 +13,44 @@ export interface UpdateProgress {
   message: string;
   /** 发现的新版本号（available 起有值，供调用方点亮/熄灭更新提醒） */
   version?: string;
-  /** 已下载字节数（仅 downloading 时有意义） */
+  /** 已下载字节数（downloading 起有值，安装/重启阶段沿用最后一次） */
   downloaded?: number;
   /** 总字节数；undefined / 0 = 服务端没给 Content-Length，进度不可知 */
   total?: number;
 }
 
-/** 可直接渲染的下载进度；percent 为 null 表示「总量未知」，UI 走不确定态 */
+/**
+ * 可直接渲染的进度；**percent 为 null 表示「画不出进度条」**。
+ *
+ * 这与历史上那套「不确定态」的区别是：null 不再对应任何动画 —— 页面只报已下载
+ * 字节数、不画条。更新过程里同时存在「一条穿梭的滑块」和「一条真进度条」是两种读法，
+ * 混着出现只会让人以为进度条坏了，所以这里只认百分比这一种。
+ */
 export interface DownloadProgress {
   downloaded: number;
   total: number;
+  /** 0–100；null = 总量未知（页面不画条，只报字节数） */
   percent: number | null;
 }
 
 /**
- * 把 UpdateProgress 收敛成能直接渲染的进度；非下载中返回 null（不显示进度条）。
+ * 把 UpdateProgress 收敛成能直接渲染的进度；不需要展示进度的阶段返回 null。
  *
- * 独立出来是因为「百分比怎么算」属于更新逻辑，不该散在页面里；
+ * 独立出来是因为「百分比怎么算、哪些阶段该有条」属于更新逻辑，不该散在页面里；
  * 页面只消费 { downloaded, total, percent } 三个数。
+ *
+ * 安装与重启阶段照样给 100%：下载刚跑完就被抽掉进度条，是整条更新流程里最刺眼的一跳
+ * —— 条走到头停住、等应用重启，才像「一条从头走到尾的进度条」。
  */
 export function downloadProgress(p: UpdateProgress | null): DownloadProgress | null {
-  if (!p || p.status !== "downloading") return null;
+  if (!p) return null;
   const downloaded = p.downloaded ?? 0;
   const total = p.total ?? 0;
+  if (p.status === "installing" || p.status === "updated") {
+    // 总量未知时仍给 null：没有分母就没有百分比，宁可只报字节数
+    return { downloaded, total, percent: total > 0 ? 100 : null };
+  }
+  if (p.status !== "downloading") return null;
   return {
     downloaded,
     total,
@@ -108,11 +123,14 @@ export async function checkAndInstall(
     version: update.version,
   });
 
+  // 下载量必须跨事件累计，所以声明在 try 外面 —— 安装/重启阶段还要带上它，
+  // 好让进度条停在满格（见 downloadProgress）。
+  let downloaded = 0;
+  // 总大小只在 Started 事件里给（Progress 事件只有 chunkLength），必须在这里记住它；
+  // 若去 Progress 里取 contentLength，total 恒为 undefined → 百分比恒为 0 → 进度条永远是空条。
+  let total = 0;
+
   try {
-    let downloaded = 0;
-    // 总大小只在 Started 事件里给（Progress 事件只有 chunkLength），必须在这里记住它；
-    // 若去 Progress 里取 contentLength，total 恒为 undefined → 百分比恒为 0 → 进度条永远是空条。
-    let total = 0;
     const emit = () =>
       onProgress({
         status: "downloading",
@@ -135,7 +153,12 @@ export async function checkAndInstall(
           emit();
           break;
         case "Finished":
-          onProgress({ status: "installing", message: "正在安装更新…" });
+          onProgress({
+            status: "installing",
+            message: "正在安装更新…",
+            downloaded,
+            total,
+          });
           break;
       }
     };
@@ -145,7 +168,12 @@ export async function checkAndInstall(
     return;
   }
 
-  onProgress({ status: "updated", message: "更新完成，正在重启…" });
+  onProgress({
+    status: "updated",
+    message: "更新完成，正在重启…",
+    downloaded,
+    total,
+  });
   try {
     await relaunch();
   } catch (e) {

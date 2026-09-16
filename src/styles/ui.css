@@ -979,11 +979,6 @@ body.modal-open .content {
   color: var(--muted);
   text-align: right;
 }
-/* 总大小未知时的不确定态：一条滑块来回跑 */
-.upd-progress-bar.indet {
-  width: 40%;
-  animation: upd-slide 1.1s ease-in-out infinite;
-}
 
 /* ── 窄窗口适配 ───────────────────────────────────────────── */
 @media (max-width: 900px) {

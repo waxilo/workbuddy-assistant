@@ -109,14 +109,6 @@ body {
     transform: translate(-50%, 0) scale(1);
   }
 }
-@keyframes upd-slide {
-  0% {
-    margin-left: -40%;
-  }
-  100% {
-    margin-left: 100%;
-  }
-}
 /* 页面入场：轻微上浮。四页共用，靠 nth-child 做 40ms 递进 */
 @keyframes rise {
   from {

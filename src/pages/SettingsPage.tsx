@@ -165,7 +165,7 @@ export function SettingsPage({
     }
   };
 
-  // 下载进度：total 未知时 percent 为 null（UI 走「不确定」态），非下载中为 null
+  // 下载进度：percent 为 null = 总量未知 / 不在下载阶段（两者都不画条）
   const dl = downloadProgress(updateStatus);
 
   return (
@@ -522,12 +522,16 @@ export function SettingsPage({
               </div>
               {dl && (
                 <>
-                  <div className="upd-progress-wrap">
-                    <div
-                      className={`upd-progress-bar${dl.percent === null ? " indet" : ""}`}
-                      style={dl.percent === null ? undefined : { width: `${dl.percent}%` }}
-                    />
-                  </div>
+                  {/* 只有拿得到百分比才画条：总量未知时进度条没有可信的长度，
+                      与其摆一条会自己动的不确定态，不如干脆不画（下面照实报字节数）。 */}
+                  {dl.percent !== null && (
+                    <div className="upd-progress-wrap">
+                      <div
+                        className="upd-progress-bar"
+                        style={{ width: `${dl.percent}%` }}
+                      />
+                    </div>
+                  )}
                   <div className="upd-progress-text">
                     {dl.percent === null
                       ? `已下载 ${formatBytes(dl.downloaded)}`
