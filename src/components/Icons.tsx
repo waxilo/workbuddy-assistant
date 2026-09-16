@@ -193,3 +193,9 @@ export const IconInfo = (p: IconProps) => (
     <path d="M12 16v-4M12 8h.01" />
   </Svg>
 );
+
+export const IconX = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M18 6 6 18M6 6l12 12" />
+  </Svg>
+);

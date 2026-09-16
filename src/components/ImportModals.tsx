@@ -15,6 +15,13 @@ import {
 import { baseName, maskPhone, maskToken } from "../common";
 import type { Toast } from "../common";
 import { Dialog } from "./Dialog";
+import {
+  IconAlertTriangle,
+  IconClock,
+  IconFile,
+  IconInfo,
+  IconUserPlus,
+} from "./Icons";
 
 /**
  * 账号导入的两条通道（都保留弹窗形态——它们是「做完即走」的任务流）：
@@ -47,7 +54,10 @@ export function LocalAccountsModal({
   const scan = useCallback(async () => {
     setLoading(true);
     try {
-      setList(await discoverLocalAccounts());
+      // `?? []` 不是多余的：这个返回值会直接喂给下面的 `list.filter`，
+      // 一旦 IPC 回了 null（命令名改了 / 后端没注册），崩的是整个 React 树 ——
+      // 表现成「打开导入弹窗，整个应用白屏」，而不是「这个弹窗里没有账号」。
+      setList((await discoverLocalAccounts()) ?? []);
     } catch {
       setList([]);
     } finally {
@@ -101,63 +111,25 @@ export function LocalAccountsModal({
   };
 
   return (
-    <Dialog label="导入本机账号" className="wide" onClose={onClose}>
-        <h2>导入本机账号</h2>
-        <p className="hint">
-          WorkBuddy 登录后会把账号与凭证写到本机
-          <code>CodeBuddyExtension/Data/Public/auth/*.info</code>，这里直接读取它 ——
-          <strong>不需要 WorkBuddy 正在运行，也不用改启动方式</strong>，而且能一次拿到昵称与手机号。
-          仅读取、不外传。
-        </p>
-
-        {loading ? (
-          <p>读取中…</p>
-        ) : list.length === 0 ? (
-          <p className="empty">
-            未找到登录信息文件。请先在 WorkBuddy 桌面端登录一次（本工具只读，不会改动它）。
-          </p>
-        ) : (
-          <ul className="local-list">
-            {list.map((d) => {
-              const added = addedTokens.has(d.token);
-              return (
-                <li key={d.file} className="local-item">
-                  <div className="local-info">
-                    <div className="local-title">
-                      <span className="local-name">
-                        {d.nickname || d.uid?.slice(0, 8) || "未命名账号"}
-                      </span>
-                      {d.phone && <span className="ac-phone">{maskPhone(d.phone)}</span>}
-                      {d.is_current && (
-                        <span className="badge badge-ok">当前登录</span>
-                      )}
-                    </div>
-                    <div className="ac-meta">
-                      <code className="tok">{maskToken(d.token)}</code>
-                      {d.host && <span className="tag">{d.host}</span>}
-                      <span className="tag">{baseName(d.file)}</span>
-                    </div>
-                    {d.uid && <div className="local-uid">uid {d.uid}</div>}
-                  </div>
-                  <button
-                    className="btn small"
-                    disabled={added || importing}
-                    onClick={() => void doImport([toItem(d)])}
-                  >
-                    {added ? "已添加" : "导入"}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-
-        <div className="modal-actions">
+    <Dialog
+      size="lg"
+      icon={<IconFile size={16} />}
+      title="导入本机账号"
+      label="导入本机账号"
+      onClose={onClose}
+      tools={
+        <button
+          className="btn small"
+          disabled={loading}
+          onClick={() => void scan()}
+        >
+          重新读取
+        </button>
+      }
+      footer={
+        <>
           <button className="btn ghost" onClick={onClose}>
             关闭
-          </button>
-          <button className="btn ghost" onClick={() => void scan()}>
-            重新读取
           </button>
           <button
             className="btn primary"
@@ -166,7 +138,66 @@ export function LocalAccountsModal({
           >
             {importing ? "导入中…" : `全部导入（${pending.length}）`}
           </button>
-        </div>
+        </>
+      }
+    >
+      <p className="note">
+        <IconInfo size={14} />
+        <span>
+          WorkBuddy 登录后会把账号与凭证写到本机
+          <code>CodeBuddyExtension/Data/Public/auth/*.info</code>，这里直接读取它 ——
+          <b>不需要 WorkBuddy 正在运行，也不用改启动方式</b>，而且能一次拿到昵称与手机号。
+          仅读取、不外传。
+        </span>
+      </p>
+
+      {loading ? (
+        <p className="empty">读取中…</p>
+      ) : list.length === 0 ? (
+        <p className="empty">
+          未找到登录信息文件。请先在 WorkBuddy 桌面端登录一次（本工具只读，不会改动它）。
+        </p>
+      ) : (
+        <ul className="pick-list">
+          {list.map((d) => {
+            const added = addedTokens.has(d.token);
+            return (
+              <li
+                key={d.file}
+                className={"pick-item static" + (added ? " locked" : "")}
+              >
+                <div className="pick-main">
+                  <div className="pick-name">
+                    {d.nickname || d.uid?.slice(0, 8) || "未命名账号"}
+                    {d.phone && (
+                      <span className="ac-phone">{maskPhone(d.phone)}</span>
+                    )}
+                    {d.is_current && (
+                      <span className="badge badge-ok">当前登录</span>
+                    )}
+                    {added && <span className="badge badge-idle">已添加</span>}
+                  </div>
+                  <div className="ac-meta">
+                    <code className="tok">{maskToken(d.token)}</code>
+                    {d.host && <span className="tag">{d.host}</span>}
+                    <span className="tag">{baseName(d.file)}</span>
+                    {d.uid && <span className="tag">uid {d.uid}</span>}
+                  </div>
+                </div>
+                <span className="pick-tail">
+                  <button
+                    className="btn small"
+                    disabled={added || importing}
+                    onClick={() => void doImport([toItem(d)])}
+                  >
+                    {added ? "已添加" : "导入"}
+                  </button>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </Dialog>
   );
 }
@@ -229,19 +260,18 @@ export function OAuthModal({
     }
   };
 
+  // 弹窗外壳由 OAuthPanel 自己渲染：底部按钮要随授权阶段（等待中 / 已授权 / 失败）
+  // 变化，而阶段状态就在面板里。为了把按钮塞进 footer 而把整套轮询状态提上来，
+  // 只会让这个组件变成两个都想管状态的容器。
   return (
-    <Dialog label="登录新账号" className="wide" onClose={onClose}>
-        <h2>登录新账号</h2>
-        {/* key 让面板在探测到默认域后重建，避免内部 host 状态停留在初始值 */}
-        <OAuthPanel
-          key={defaultHost}
-          defaultHost={defaultHost}
-          importing={importing}
-          onImport={doImport}
-          onToast={onToast}
-          onDone={onClose}
-        />
-    </Dialog>
+    <OAuthPanel
+      key={defaultHost}
+      defaultHost={defaultHost}
+      importing={importing}
+      onImport={doImport}
+      onToast={onToast}
+      onClose={onClose}
+    />
   );
 }
 
@@ -255,13 +285,13 @@ function OAuthPanel({
   importing,
   onImport,
   onToast,
-  onDone,
+  onClose,
 }: {
   defaultHost: string;
   importing: boolean;
   onImport: (items: ImportItem[]) => Promise<void>;
   onToast: (t: Toast) => void;
-  onDone: () => void;
+  onClose: () => void;
 }) {
   const HOSTS = [
     { value: "https://www.workbuddy.cn", label: "国内版 · www.workbuddy.cn" },
@@ -354,68 +384,16 @@ function OAuthPanel({
   };
 
   return (
-    <>
-      <p className="hint">
-        向官方授权接口申请一个 <code>state</code>，在<strong>系统浏览器</strong>里完成一次登录
-        （扫码即可），本工具轮询取得该账号的凭证 ——
-        <strong>不重启、不打断当前 WorkBuddy，也不改动本机登录文件</strong>。
-        适合把第二个 / 第三个账号收进来。
-      </p>
-
-      {phase === "idle" && (
-        <div className="opt-col">
-          <label className="wide">
-            接口域
-            <select value={host} onChange={(e) => setHost(e.target.value)}>
-              {HOSTS.map((h) => (
-                <option key={h.value} value={h.value}>
-                  {h.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
-
-      {phase === "waiting" && (
-        <>
-          <p className="oauth-wait">
-            ⏳ 请在弹出的浏览器窗口中完成登录 / 扫码… 已等待 {waited}s（10 分钟内有效）
-          </p>
-          {uri && (
-            <div className="oauth-uri">
-              <code>{uri}</code>
-              <button className="btn small" onClick={() => void openExternal(uri)}>
-                重新打开
-              </button>
-            </div>
-          )}
-        </>
-      )}
-
-      {phase === "done" && result?.token && (
-        <div className="result-card">
-          <div className="local-title">
-            <span className="local-name">
-              {result.nickname || result.uid?.slice(0, 8) || "新账号"}
-            </span>
-            {result.phone && <span className="ac-phone">{maskPhone(result.phone)}</span>}
-            <span className="badge badge-ok">授权成功</span>
-          </div>
-          <div className="ac-meta">
-            <code className="tok">{maskToken(result.token)}</code>
-            {result.host && <span className="tag">{result.host}</span>}
-            {result.uid && <span className="tag">uid {result.uid}</span>}
-          </div>
-        </div>
-      )}
-
-      {phase === "error" && <p className="empty">授权失败：{err}</p>}
-
-      <div className="modal-actions">
-        {phase === "done" && result?.token ? (
+    <Dialog
+      size="lg"
+      icon={<IconUserPlus size={16} />}
+      title="登录新账号"
+      label="登录新账号"
+      onClose={onClose}
+      footer={
+        phase === "done" && result?.token ? (
           <>
-            <button className="btn ghost" onClick={onDone} disabled={importing}>
+            <button className="btn ghost" onClick={onClose} disabled={importing}>
               关闭
             </button>
             <button className="btn ghost" onClick={reset} disabled={importing}>
@@ -441,20 +419,96 @@ function OAuthPanel({
             </button>
           </>
         ) : phase === "waiting" ? (
-          <button className="btn ghost" onClick={reset}>
+          <button className="btn" onClick={reset}>
             取消
           </button>
         ) : (
           <>
-            <button className="btn ghost" onClick={onDone}>
+            <button className="btn ghost" onClick={onClose}>
               关闭
             </button>
             <button className="btn primary" onClick={() => void begin()}>
               打开授权页并开始
             </button>
           </>
-        )}
-      </div>
-    </>
+        )
+      }
+    >
+      <p className="note">
+        <IconInfo size={14} />
+        <span>
+          向官方授权接口申请一个 <code>state</code>，在<b>系统浏览器</b>里完成一次登录
+          （扫码即可），本工具轮询取得该账号的凭证 ——
+          <b>不重启、不打断当前 WorkBuddy，也不改动本机登录文件</b>。
+          适合把第二个 / 第三个账号收进来。
+        </span>
+      </p>
+
+      {phase === "idle" && (
+        <label>
+          {/* 不再挂钩 wide：那套 .opt-col label.wide 的限宽规则已随「弹窗内
+              不再自造表单布局」一起删掉，.modal label 本来就占满整行 */}
+          接口域
+          <select value={host} onChange={(e) => setHost(e.target.value)}>
+            {HOSTS.map((h) => (
+              <option key={h.value} value={h.value}>
+                {h.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {phase === "waiting" && (
+        <>
+          <p className="note info">
+            <IconClock size={14} />
+            <span>
+              请在弹出的浏览器窗口中完成登录 / 扫码…… 已等待 {waited}s（10 分钟内有效）。
+              完成后这个窗口会自己跳到下一步，不用你回来点任何东西。
+            </span>
+          </p>
+          {uri && (
+            <div className="oauth-uri">
+              <code>{uri}</code>
+              <button
+                className="btn small"
+                onClick={() => void openExternal(uri)}
+              >
+                重新打开
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {phase === "done" && result?.token && (
+        <div className="pick-item static locked">
+          <div className="pick-main">
+            <div className="pick-name">
+              {result.nickname || result.uid?.slice(0, 8) || "新账号"}
+              {result.phone && (
+                <span className="ac-phone">{maskPhone(result.phone)}</span>
+              )}
+            </div>
+            <div className="ac-meta">
+              <code className="tok">{maskToken(result.token)}</code>
+              {result.host && <span className="tag">{result.host}</span>}
+              {result.uid && <span className="tag">uid {result.uid}</span>}
+            </div>
+          </div>
+          <span className="pick-tail">
+            <span className="pick-state ok">授权成功</span>
+          </span>
+        </div>
+      )}
+
+      {phase === "error" && (
+        <p className="note danger">
+          <IconAlertTriangle size={14} />
+          <span>授权失败：{err}</span>
+        </p>
+      )}
+    </Dialog>
   );
 }

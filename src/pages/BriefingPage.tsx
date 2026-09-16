@@ -12,7 +12,7 @@ import { AccountCell, EmptyState, formatCredits } from "../common";
 import type { ConfirmReq, Toast } from "../common";
 import { Dialog } from "../components/Dialog";
 import { Toggle } from "../components/SettingsControls";
-import { IconActivity, IconInfo, IconTrash } from "../components/Icons";
+import { IconActivity, IconClock, IconInfo, IconTrash } from "../components/Icons";
 
 /** 小时写成 `09:00`：补零之后整列数字才对得齐 */
 const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
@@ -368,18 +368,19 @@ function HourDialog({
   const next = hh((entry.hour + 1) % 24);
   return (
     <Dialog
-      className="wide"
+      size="lg"
+      icon={<IconClock size={16} />}
+      title={`${entry.date} ${hh(entry.hour)} – ${next}`}
       label={`${entry.date} ${hh(entry.hour)} 扣费明细`}
       onClose={onClose}
+      footer={
+        <button className="btn" onClick={onClose}>
+          关闭
+        </button>
+      }
     >
-      {/* 弹窗标题一律用裸 <h2>：字号/边距由 `.modal h2` 一处定义。
-          旧实现在这里挂了个 `modal-title`，那个类在 CSS 里**根本不存在** —— 
-          等于靠 h3 的浏览器默认样式撑着，各个弹窗标题因此大小不一。 */}
-      <h2>
-        {entry.date} {hh(entry.hour)} – {next}
-      </h2>
-      <p className="brief-note">
-        <IconInfo size={13} />
+      <p className="note">
+        <IconInfo size={14} />
         <span>
           消耗与新增都取自资源包的<b>累计量</b>差值（消耗量 / 授予量各自独立），
           所以这段时间里哪怕换了客户端、或者先花后得，也都不会被抹平。
@@ -387,30 +388,30 @@ function HourDialog({
         </span>
       </p>
 
-      <div className="summary brief-summary">
-        <div className="sum-card card">
-          <span className="sum-label">消耗</span>
-          <span className="sum-num bp-consumed">
+      <div className="stat-row">
+        <div className="stat">
+          <span className="stat-label">消耗</span>
+          <span className="stat-num bp-consumed">
             {formatCredits(entry.consumed)}
           </span>
         </div>
-        <div className="sum-card card">
-          <span className="sum-label">新增</span>
-          <span className="sum-num ok">{formatCredits(entry.gained)}</span>
+        <div className="stat">
+          <span className="stat-label">新增</span>
+          <span className="stat-num ok">{formatCredits(entry.gained)}</span>
         </div>
-        <div className="sum-card card">
-          <span className="sum-label">剩余</span>
-          <span className="sum-num">
+        <div className="stat">
+          <span className="stat-label">剩余</span>
+          <span className="stat-num">
             {entry.balance == null ? "—" : formatCredits(entry.balance)}
           </span>
         </div>
-        <div className="sum-card card">
-          <span className="sum-label">账号</span>
-          <span className="sum-num">{entry.accounts.length}</span>
+        <div className="stat">
+          <span className="stat-label">账号</span>
+          <span className="stat-num">{entry.accounts.length}</span>
         </div>
       </div>
 
-      <p className="brief-when">结算时刻 {entry.generated_at}</p>
+      <p className="modal-meta">结算时刻 {entry.generated_at}</p>
 
       <div className="table-wrap">
         <table className="data-table">
@@ -453,12 +454,6 @@ function HourDialog({
             ))}
           </tbody>
         </table>
-      </div>
-
-      <div className="modal-actions">
-        <button className="btn" onClick={onClose}>
-          关闭
-        </button>
       </div>
     </Dialog>
   );

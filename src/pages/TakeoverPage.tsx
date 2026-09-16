@@ -8,9 +8,9 @@ import {
   stealthStatus,
   freeModels,
 } from "../api";
-import { maskPhone } from "../common";
+import { AccountCell } from "../common";
 import type { ConfirmReq, Toast } from "../common";
-import { IconInfo } from "../components/Icons";
+import { IconBolt, IconInfo, IconUser } from "../components/Icons";
 import { Row, Toggle } from "../components/SettingsControls";
 import { Dialog } from "../components/Dialog";
 
@@ -481,60 +481,25 @@ export function TakeoverPage({
       {/* ── 扣费账号选择弹框（草稿制：点「保存」才生效） ── */}
       {pickerOpen && (
         <Dialog
+          size="md"
+          icon={<IconUser size={16} />}
+          title="选择扣费账号"
           label="选择扣费账号"
           onClose={() => {
             setDraft(null);
             setPickerOpen(false);
           }}
-        >
-          <h2>选择扣费账号</h2>
-            <p className="hint">
-              勾选的账号才允许被扣费（会话粘滞 + 积分最早过期优先轮换），未勾选的账号会被排除；
-              默认全部勾选（智能轮换）。点「保存」立即生效，无需重启。
-            </p>
-            <input
-              type="text"
-              className="acct-filter"
-              placeholder="按用户名或手机号过滤…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            {accounts.length === 0 ? (
-              <p className="hint">还没有账号。先到「账号签到」页登录或导入账号。</p>
-            ) : filteredAccounts.length === 0 ? (
-              <p className="hint">没有匹配「{query}」的账号。</p>
-            ) : (
-              <ul className="acct-multi">
-                {filteredAccounts.map((a) => (
-                  <li
-                    key={a.id}
-                    className={draftEffective.includes(a.id) ? "picked" : ""}
-                    onClick={() => toggleDraft(a.id)}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={draftEffective.includes(a.id)}
-                      onChange={() => toggleDraft(a.id)}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    <span className="am-name">{maskPhone(a.name)}</span>
-                    {a.phone && <span className="am-phone">{maskPhone(a.phone)}</span>}
-                    <span className="am-state">
-                      {draftEffective.includes(a.id) ? "可扣费" : "已排除"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="modal-actions">
-              <button
-                className="btn"
-                onClick={() => setDraft(allIds)}
-                disabled={accounts.length === 0}
-              >
-                全部勾选
-              </button>
-              <span className="spacer" />
+          tools={
+            <button
+              className="btn small"
+              onClick={() => setDraft(allIds)}
+              disabled={accounts.length === 0}
+            >
+              全部勾选
+            </button>
+          }
+          footer={
+            <>
               <button
                 className="btn"
                 onClick={() => {
@@ -551,89 +516,79 @@ export function TakeoverPage({
               >
                 {busy ? "保存中…" : "保存"}
               </button>
-            </div>
+            </>
+          }
+        >
+          <p className="note">
+            <IconInfo size={14} />
+            <span>
+              勾选的账号才允许被扣费（会话粘滞 + 积分最早过期优先轮换），未勾选的账号会被排除；
+              默认全部勾选（智能轮换）。点「保存」立即生效，无需重启。
+            </span>
+          </p>
+          {/* 一个普通的文本输入框：`.modal input` 已经给了外观，
+              上下间距由 `.modal-body > * + *` 统一负责，不再需要专属 class */}
+          <input
+            type="text"
+            placeholder="按用户名或手机号过滤…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {accounts.length === 0 ? (
+            <p className="empty">还没有账号。先到「账号签到」页登录或导入账号。</p>
+          ) : filteredAccounts.length === 0 ? (
+            <p className="empty">没有匹配「{query}」的账号。</p>
+          ) : (
+            <ul className="pick-list">
+              {filteredAccounts.map((a) => {
+                const picked = draftEffective.includes(a.id);
+                return (
+                  <li
+                    key={a.id}
+                    className={"pick-item" + (picked ? " picked" : "")}
+                    onClick={() => toggleDraft(a.id)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={picked}
+                      onChange={() => toggleDraft(a.id)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    {/* 用全应用统一的账号单元格（头像 + 名称 + 手机号）——
+                        此前这里是手拼的两段文字，与表格里的账号列长得不一样 */}
+                    <AccountCell name={a.name} phone={a.phone} />
+                    <span className="pick-tail">
+                      <span className="pick-state">
+                        {picked ? "可扣费" : "已排除"}
+                      </span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </Dialog>
       )}
 
       {/* ── 限流切换模型弹框（草稿制：点「保存」才生效） ── */}
       {mdlOpen && (
-        <Dialog label="限流切换" onClose={closeModelPicker}>
-          <h2>限流切换</h2>
-            <p className="hint">
-              选中的模型触发限流（429）时，代理会将该账号冷却 10 分钟、自动换备用账号重发同一请求，对话完全无感；
-              换号按「积分最早过期」优先（先消耗快过期的额度）。
-              0 积分（免费）模型默认全部生效、不可取消；付费模型勾选后同样生效。
-              模型列表从网关动态拉取（缓存 1 小时），腾讯增删模型后点「刷新」即可同步。
-            </p>
-            <Row
-              title="限流时在同一会话内换号"
-              desc="关掉后 429 原样透传给客户端，不冷却、不换号——同一会话自始至终只用一个账号。风控视角下「一个会话中途换凭证」是极高异常值，代价是这种情况要等上游自己解除限流。"
-              ctrl={
-                <Toggle
-                  checked={mdlFailover ?? rlFailover}
-                  onChange={setMdlFailover}
-                  title="会话内不换号 = 调用凭证稳定"
-                />
-              }
-            />
-            {fm && (
-              <p className="hint fm-source">
-                {fm.source === "fetched"
-                  ? "来源：刚从网关拉取"
-                  : fm.source === "cache"
-                  ? "来源：缓存（1 小时内有效）"
-                  : "来源：内置兜底列表（网关拉取失败，可点「刷新」重试）"}
-              </p>
-            )}
-            {fm == null ? (
-              <p className="hint">加载中…（从网关拉取模型列表）</p>
-            ) : fm.models.length === 0 ? (
-              <p className="hint">暂未发现模型。</p>
-            ) : (
-              <ul className="rl-list">
-                {fm.models.map((m) => {
-                  const checked = m.free || (mdlDraft ?? rlModels).includes(m.id);
-                  return (
-                    <li
-                      key={m.id}
-                      className={m.free ? "rl-item free" : "rl-item"}
-                      title={
-                        m.free
-                          ? "0 积分免费模型，恒享受限流切换，不可取消"
-                          : "勾选后该付费模型也享受 429 无感换号"
-                      }
-                      onClick={() => {
-                        if (!m.free) toggleDraftModel(m.id);
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={m.free}
-                        onChange={() => {
-                          if (!m.free) toggleDraftModel(m.id);
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                      <span className="rl-name">{m.id}</span>
-                      <span className={`rl-tag ${m.free ? "free" : "paid"}`}>
-                        {m.free ? "免费" : m.multiplier || "付费"}
-                      </span>
-                      {m.free && <span className="rl-lock">默认</span>}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-            <div className="modal-actions">
-              <button
-                className="btn"
-                disabled={fmBusy}
-                onClick={() => void loadFreeModels(true)}
-              >
-                {fmBusy ? "刷新中…" : "刷新"}
-              </button>
-              <span className="spacer" />
+        <Dialog
+          size="md"
+          icon={<IconBolt size={16} />}
+          title="限流切换"
+          label="限流切换"
+          onClose={closeModelPicker}
+          tools={
+            <button
+              className="btn small"
+              disabled={fmBusy}
+              onClick={() => void loadFreeModels(true)}
+            >
+              {fmBusy ? "刷新中…" : "刷新"}
+            </button>
+          }
+          footer={
+            <>
               <button className="btn" onClick={closeModelPicker}>
                 取消
               </button>
@@ -644,7 +599,88 @@ export function TakeoverPage({
               >
                 {busy ? "保存中…" : "保存"}
               </button>
-            </div>
+            </>
+          }
+        >
+          <p className="note">
+            <IconInfo size={14} />
+            <span>
+              选中的模型触发限流（429）时，代理会将该账号冷却 10 分钟、自动换备用账号重发同一请求，
+              对话完全无感；换号按「积分最早过期」优先（先消耗快过期的额度）。
+              0 积分（免费）模型默认全部生效、不可取消；付费模型勾选后同样生效。
+              列表从网关动态拉取（缓存 1 小时），腾讯增删模型后点「刷新」即可同步。
+            </span>
+          </p>
+          <Row
+            title="限流时在同一会话内换号"
+            desc="关掉后 429 原样透传给客户端，不冷却、不换号——同一会话自始至终只用一个账号。风控视角下「一个会话中途换凭证」是极高异常值，代价是这种情况要等上游自己解除限流。"
+            ctrl={
+              <Toggle
+                checked={mdlFailover ?? rlFailover}
+                onChange={setMdlFailover}
+                title="会话内不换号 = 调用凭证稳定"
+              />
+            }
+          />
+          {fm && (
+            <p className="modal-meta">
+              {fm.source === "fetched"
+                ? "来源：刚从网关拉取"
+                : fm.source === "cache"
+                ? "来源：缓存（1 小时内有效）"
+                : "来源：内置兜底列表（网关拉取失败，可点「刷新」重试）"}
+            </p>
+          )}
+          {fm == null ? (
+            <p className="empty">加载中…（从网关拉取模型列表）</p>
+          ) : fm.models.length === 0 ? (
+            <p className="empty">暂未发现模型。</p>
+          ) : (
+            <ul className="pick-list">
+              {fm.models.map((m) => {
+                const checked = m.free || (mdlDraft ?? rlModels).includes(m.id);
+                return (
+                  <li
+                    key={m.id}
+                    className={
+                      "pick-item" +
+                      (m.free ? " locked" : checked ? " picked" : "")
+                    }
+                    title={
+                      m.free
+                        ? "0 积分免费模型，恒享受限流切换，不可取消"
+                        : "勾选后该付费模型也享受 429 无感换号"
+                    }
+                    onClick={() => {
+                      if (!m.free) toggleDraftModel(m.id);
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={m.free}
+                      onChange={() => {
+                        if (!m.free) toggleDraftModel(m.id);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <span className="pick-main">
+                      <span className="pick-name mono">{m.id}</span>
+                    </span>
+                    <span className="pick-tail">
+                      {/* 免费模型：一个胶囊说清「免费 + 默认生效」——
+                          旧实现是「免费」胶囊 + 「默认」两个元素，说的是同一件事 */}
+                      <span
+                        className={"pick-state " + (m.free ? "ok" : "warn")}
+                      >
+                        {m.free ? "免费 · 默认" : m.multiplier || "付费"}
+                      </span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </Dialog>
       )}
     </section>
