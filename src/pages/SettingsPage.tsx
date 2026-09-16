@@ -384,7 +384,7 @@ export function SettingsPage({
         </div>
       </div>
 
-      {/* 签到与日报通知 */}
+      {/* 签到与简报通知 */}
       <div className="set-card card">
         <div className="set-card-head">
           <span className="set-card-icon">
