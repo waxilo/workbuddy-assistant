@@ -995,6 +995,9 @@ pub(crate) async fn sample_into(
             }
         }
     }
+    // 清掉超期的桶。`merge_account` 每次写入都会剪一遍，但**只对读到了包的账号**生效 ——
+    // 接口连续失败的账号一个包都没读到，它的桶就永远不会被剪（应用开着也只是慢慢变大）。
+    ledger::prune_buckets(&mut led.accts, chrono::Local::now().date_naive());
     balances
 }
 
@@ -1028,6 +1031,9 @@ pub(crate) fn seal_hours(
     if sealed.is_empty() {
         return Vec::new();
     }
+    // 落盘前必须收口：这里是「读全量 → 就地改 → 整体写回」，不经过任何单条写入函数，
+    // 漏了这一刀文件就会无限增长（每加一条就多一条，永远没人删）。
+    briefing::normalize(&mut all);
     // 落盘失败只意味着「这次没记住」：固化是幂等的，下一跳会重算一遍，
     // 所以这里吞掉错误（返回的 sealed 是给界面刷新用的，不是「已持久化」的凭据）。
     let _ = briefing::save(dir, &all);
