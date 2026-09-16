@@ -6,9 +6,7 @@ import type {
   OAuthStart,
   OAuthPoll,
   CheckinLog,
-  CreditReport,
-  CreditSnapshot,
-  SnapshotDiff,
+  DayEntry,
   ImportItem,
   ImportReport,
   NetReport,
@@ -128,41 +126,26 @@ export const clearTakeoverEvents = () => invoke<void>("takeover_events_clear");
 export const freeModels = (refresh: boolean) =>
   invoke<FreeModelsReport>("free_models", { refresh });
 
-/** 每日积分日报（新的在前）：窗口 = 上次结算 → 本次结算 */
-export const creditReports = () => invoke<CreditReport[]>("credit_reports");
-
-/** 清空日报历史（不影响积分台账与结算基线） */
-export const clearCreditReports = () => invoke<void>("credit_reports_clear");
-
 /**
- * **开启积分日报**：清空日报与快照历史 → 立即拉一次接口 → 把此刻读数落成
- * 第一条**系统快照**（兼作对比基线）。
+ * 积分简报的**日条目**（新的在前）。
  *
- * 有了这一步，用户不必等「次日首次打开应用」才看到第一条；开启即有一条基线，
- * 之后每天封口各推一条。**保留积分台账**（小时桶是真实采样，且是增量的基准）。
+ * 日条目是当天时条目之和、由后端现算（不落盘），所以读到的永远和展开看到的一致。
+ * 条目只由后台每小时结算产生，**没有任何手动生成的入口**。
  */
-export const enableCreditReports = () =>
-  invoke<CreditReport>("credit_reports_enable");
+export const creditBriefing = () => invoke<DayEntry[]>("credit_briefing");
+
+/** 清空简报历史（时条目 + 台账里的小时桶；逐包累计值保留） */
+export const clearCreditBriefing = () =>
+  invoke<void>("credit_briefing_clear");
 
 /**
- * 取一次**当前累计读数**（「当前累计」按钮）。
+ * **开启积分简报**：清历史 → 立刻采一次样 → 只对齐基线（不记这一段增量）。
  *
- * 会实时重拉接口、把逐包明细并进台账，并把这一刻的读数落成一条 `manual` 快照
- * （可与别的快照相减看增量）。但**不写日报历史** —— 日报列表只收完整自然日。
+ * 断档期（应用没开着的那几天）攒下的增量既归不到具体的小时、又不该算进开启后的
+ * 第一个小时，所以开启时宁可不记，也不让用户一开启就看到一笔巨额消耗。
  */
-export const settleCreditReport = () =>
-  invoke<CreditReport>("credit_report_settle");
+export const enableCreditBriefing = () =>
+  invoke<void>("credit_briefing_enable");
 
-/** 积分快照（新的在前）：某一刻的读数，不是「一天的聚合」 */
-export const creditSnapshots = () =>
-  invoke<CreditSnapshot[]>("credit_snapshots");
-
-/**
- * 每条快照与它**前面那一条**的差值增量。
- * 下标对应 {@link creditSnapshots} 返回数组里的位置；最老的一条没有前辈，不在结果里。
- */
-export const creditSnapshotDiffs = () =>
-  invoke<[number, SnapshotDiff][]>("credit_snapshot_diffs");
-
-/** 清空全部快照（含系统锚点）。不影响日报历史与积分台账 */
-export const clearCreditSnapshots = () => invoke<void>("credit_snapshots_clear");
+/** 后台每小时固化出新的时条目时后端发的通知（payload: { hours: number }） */
+export const BRIEFING_SEALED_EVENT = "credit-briefing-sealed";

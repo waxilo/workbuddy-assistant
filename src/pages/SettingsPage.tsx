@@ -22,7 +22,7 @@ import { NetfixCard } from "../components/NetfixCard";
  * 开关统一用 .switch 切换。网络急救作为一张卡收敛在本页底部（见 NetfixCard），
  * 智能接管仍独立成页；接管相关字段（proxy_* / billing_account_ids）本页没有编辑权，保存时原样透传。
  *
- * 日报的**开关**在「积分日报」页（那一页才是它的主场），本页只留它的
+ * 简报的**开关**在「积分简报」页（那一页才是它的主场），本页只留它的
  * **推送开关**并与两条签到通知并排 —— 「哪些东西会推送」集中在一处才看得清。
  */
 export function SettingsPage({
@@ -59,9 +59,9 @@ export function SettingsPage({
   const [webhook, setWebhook] = useState(settings.notify_webhook);
   const [notifySched, setNotifySched] = useState(settings.notify_on_schedule);
   const [notifyManual, setNotifyManual] = useState(settings.notify_on_manual);
-  // 积分日报：按自然日结算「消耗 / 新增」。**日报本身的开关在「积分日报」页**，
-  // 这里只留「结算后推送」——它与两条签到通知开关并排，一眼看清「哪些会推送」。
-  const [notifyReport, setNotifyReport] = useState(settings.notify_on_report);
+  // 积分简报：后台每小时结算时条目，推送按**天**走。**简报本身的开关在「积分简报」页**，
+  // 这里只留「生成后推送」——它与两条签到通知开关并排，一眼看清「哪些会推送」。
+  const [notifyReport, setNotifyReport] = useState(settings.notify_on_briefing);
   // 多账号风控：批量签到时账号之间随机歇几秒，避免同 IP 瞬时连发
   const [staggerOn, setStaggerOn] = useState(settings.stagger_checkin);
   const [staggerMax, setStaggerMax] = useState(String(settings.stagger_max_seconds));
@@ -391,8 +391,8 @@ export function SettingsPage({
             <IconBell size={20} />
           </span>
           <div>
-            <div className="set-card-title">签到与日报通知</div>
-            <div className="set-card-sub">签到结果与积分日报都通过同一个 webhook 推送</div>
+            <div className="set-card-title">签到与简报通知</div>
+            <div className="set-card-sub">签到结果与积分简报都通过同一个 webhook 推送</div>
           </div>
         </div>
         <div className="set-group">
@@ -461,14 +461,14 @@ export function SettingsPage({
               />
               <Row
                 bare
-                title="积分日报结算后推送"
-                desc="每天封口出完整一天后推一条。日报本身的开关在「积分日报」页。"
+                title="积分简报生成后推送"
+                desc="每天结束后推一条当天汇总（时条目每小时结算，但全天数字要等当天走完）。简报本身的开关在「积分简报」页。"
                 ctrl={
                   <Toggle
                     checked={notifyReport}
                     onChange={(v) => {
                       setNotifyReport(v);
-                      patch({ notify_on_report: v });
+                      patch({ notify_on_briefing: v });
                     }}
                   />
                 }

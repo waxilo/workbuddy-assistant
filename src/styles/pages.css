@@ -853,24 +853,25 @@
   overflow-wrap: anywhere;
 }
 
-/* ── 积分日报页 ───────────────────────────────────────────── */
-/* 消耗用暖色、新增用成功色 —— 与签到日志页「本次积分 = 绿色」的既有语言一致 */
-.rp-consumed {
+/* ── 积分简报页 ─────────────────────────────────────────────
+   三层结构：日条目（卡）→ 时条目（展开后的行）→ 逐账号扣费（行点开的弹窗）。
+   消耗用暖色、新增用成功色 —— 与签到日志页「本次积分 = 绿色」的既有语言一致。 */
+.bp-consumed {
   color: var(--warn);
 }
-.rp-gained {
+.bp-gained {
   color: var(--ok);
 }
-.report-list {
+.brief-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-/* 一条日报 = 一张卡：整行可点，展开后接一张明细表 */
-.report {
+/* 一条日条目 = 一张卡：整行可点，展开后接当天的时条目列表 */
+.brief {
   overflow: hidden;
 }
-.report-head {
+.brief-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -885,38 +886,38 @@
   cursor: pointer;
   transition: background var(--dur-1) var(--ease-out);
 }
-.report-head:hover {
+.brief-head:hover {
   background: var(--row-hover);
 }
-.report-date {
+.brief-date {
   font-size: var(--fs-md);
   font-weight: 600;
   font-variant-numeric: var(--tnum);
   white-space: nowrap;
 }
-.report-window {
+.brief-window {
   font-size: var(--fs-xs);
   color: var(--muted-2);
   font-variant-numeric: var(--tnum);
   white-space: nowrap;
 }
-.report-metric {
+.brief-metric {
   display: flex;
   align-items: baseline;
   gap: 6px;
   flex: 0 0 auto;
 }
-.report-metric .rm-label {
+.brief-metric .bm-label {
   font-size: var(--fs-cap);
   color: var(--muted);
 }
-.report-metric .rm-num {
+.brief-metric .bm-num {
   font-size: var(--fs-md);
   font-weight: 600;
   font-variant-numeric: var(--tnum);
 }
 /* 展开指示：用 border 画一个 chevron，不必为一个箭头再引一个图标 */
-.report-caret {
+.brief-caret {
   flex: 0 0 auto;
   width: 7px;
   height: 7px;
@@ -925,294 +926,140 @@
   transform: rotate(-45deg);
   transition: transform var(--dur-2) var(--ease-out);
 }
-.report-caret.open {
+.brief-caret.open {
   transform: rotate(45deg);
 }
-/* 展开的明细表：与上面那行之间留一条分隔线，不然会贴在按钮上 */
-.report .table-wrap {
+
+/* ── 时条目行 ───────────────────────────────────────────── */
+/* 展开出来的列表：与上面那行之间留一条分隔线，不然会贴在按钮上 */
+.brief-hours {
+  display: flex;
+  flex-direction: column;
   border-top: 1px solid var(--border);
+  background: var(--panel-2);
+}
+/* 一行时条目 = 一颗整行可点的按钮（点开才是逐账号扣费） */
+.bh-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 18px;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-variant-numeric: var(--tnum);
+  transition: background var(--dur-1) var(--ease-out);
+}
+.bh-row + .bh-row {
+  border-top: 1px solid var(--hairline);
+}
+.bh-row:hover {
+  background: var(--panel-3);
+}
+.bh-hour {
+  flex: 0 0 auto;
+  width: 46px;
+  color: var(--text-2);
+}
+/* 迷你条：两根细横条按**当天**峰值归一 —— 只看形状（哪个小时最贵），
+   精确读数在右边那一列数字里。0 值不画：给一个最小宽度会让人误以为有数据。 */
+.bh-track {
+  flex: 1 1 auto;
+  min-width: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.bh-fill {
+  display: block;
+  height: 4px;
+  border-radius: var(--radius-pill);
+}
+.bh-fill.consumed {
+  background: var(--warn);
+}
+.bh-fill.gained {
+  background: var(--ok);
+}
+.bh-num {
+  flex: 0 0 auto;
+  min-width: 62px;
+  font-weight: 600;
+  text-align: right;
+}
+.bh-accts {
+  flex: 0 0 auto;
+  min-width: 62px;
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+}
+.bh-more {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--primary);
+}
+.brief-hint {
+  margin: 0;
+  padding: 9px 18px 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+  color: var(--muted-2);
 }
 
-/* ── 当前累计快照弹窗 ───────────────────────────────────────── */
-/* 快照弹窗里的汇总卡：4 张并排，比页面上的略紧凑（弹窗宽度有限） */
-.snap-summary {
-  margin: 4px 0 0;
-}
-.snap-note {
+/* ── 时条目弹窗（逐账号扣费）────────────────────────────── */
+.brief-note {
   display: flex;
   align-items: flex-start;
   gap: 6px;
   margin: 10px 0 14px;
   padding: 9px 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
   font-size: var(--fs-cap);
   line-height: 1.6;
   color: var(--muted);
 }
-.snap-note svg {
+.brief-note svg {
   flex: 0 0 auto;
   margin-top: 2px;
 }
 /* 正文包一层：容器是 flex，裸的 <b> 会变成独立 flex item 把文字拆成几列
    （与 .set-intro 同一个坑） */
-.snap-note > span {
+.brief-note > span {
   flex: 1 1 auto;
   min-width: 0;
 }
-.snap-when {
+.brief-when {
   margin: 12px 0 0;
   font-size: var(--fs-micro);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-
-/* ── 快照区（日报页底部） ────────────────────────────────────
-   独立于日报列表：口径是「某一刻的读数」而不是「一天一条」，所以它
-   不参与合计，也不与日报混合排序。每行右侧给出与上一条的增量。 */
-.snap-block {
-  padding: 14px 18px 16px;
-}
-.snap-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-.snap-title {
-  font-size: var(--fs-body);
-  font-weight: 600;
-  color: var(--text);
-}
-.snap-sub {
-  font-size: var(--fs-cap);
-  color: var(--muted);
-}
-.snap-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-/* 行本身用 panel-2 打底，靠 1px 缝隙形成分隔线 */
-.snap-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 12px;
-  background: var(--panel-2);
-  font-size: var(--fs-cap);
-  font-variant-numeric: tabular-nums;
-}
-.snap-tag {
-  flex: 0 0 auto;
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  font-size: var(--fs-micro);
-  color: var(--muted);
-}
-/* 系统快照是锚点，给它一点强调；手动是临时样本，保持低调 */
-.snap-tag.system {
-  border-color: var(--primary-line);
-  background: var(--primary-soft);
-  color: var(--primary-d);
-}
-.snap-at {
-  flex: 0 0 auto;
-  color: var(--text);
-}
-.snap-bal {
-  flex: 0 0 auto;
-  color: var(--muted);
-}
-.snap-pts {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.snap-delta {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.sd-span {
-  color: var(--muted);
-  font-size: var(--fs-micro);
-}
-.sd-first {
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-style: italic;
-}
-.snap-block .snap-note {
-  margin: 12px 0 0;
+/* 弹窗里的汇总卡：4 张并排，比页面上的略紧凑（弹窗宽度有限） */
+.brief-summary {
+  margin: 4px 0 0;
 }
 
-/* 日报页的开关：`.logs-toolbar` 是 flex，控件间距交给它的 gap，
+/* 简报页的开关：`.logs-toolbar` 是 flex，控件间距交给它的 gap，
    这里只负责「开关 + 状态文字」自己内部对齐（文字跟着开关走，别被 flex 拉开）。 */
-.rp-toggle {
+.bp-toggle {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
   cursor: pointer;
 }
-.rp-toggle-text {
+.bp-toggle-text {
   font-size: var(--fs-sm);
   color: var(--muted);
   white-space: nowrap;
 }
-
-/* ── 逐小时视图 ───────────────────────────────────────────────
-   24 根纯 CSS 柱，不引图表库：数据来自本地 IPC、只有一屏柱子，
-   为它加一个依赖不划算。每格两根细柱表示消耗与新增，各自按峰值归一。 */
-.hour-block {
-  padding: 14px 18px 12px;
-  border-top: 1px solid var(--border);
-  background: var(--panel-2);
-}
-.hour-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.hour-title {
-  font-size: var(--fs-cap);
-  font-weight: 600;
-  color: var(--text);
-}
-.hour-legend {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--fs-micro);
-  color: var(--muted);
-}
-/* 图例小方块用背景色表示系列色，与柱体同源 */
-.hour-legend .lg-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  display: inline-block;
-}
-.hour-legend .lg-dot + .lg-dot {
-  margin-left: 6px;
-}
-.rp-consumed-bg {
-  background: var(--warn);
-}
-.rp-gained-bg {
-  background: var(--ok);
-}
-.hour-peak {
-  margin-left: auto;
-  font-size: var(--fs-micro);
-  color: var(--muted-2);
-  font-variant-numeric: var(--tnum);
-}
-/* 柱区：固定高，柱子从底部长起来 */
-.hour-chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 92px;
-  padding: 0 1px;
-}
-.hour-col {
-  flex: 1 1 0;
-  height: 100%;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  /* 偶数小时给一点点底色，便于快速定位某一格（24 格无参照很难数） */
-  border-radius: 3px 3px 0 0;
-}
-.hour-col:nth-child(even) {
-  background: var(--panel-3);
-}
-.hour-bars {
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 2px;
-  width: 100%;
-  height: 100%;
-}
-/* 值为 0 时高度 0 —— 给一个 2px 的最小可见高度会让人误以为有数据，故不加 */
-.hour-bars .bar {
-  width: 45%;
-  max-width: 7px;
-  border-radius: 2px 2px 0 0;
-  transition: height var(--dur-2) var(--ease-out);
-}
-.bar-consumed {
-  background: var(--warn);
-}
-.bar-gained {
-  background: var(--ok);
-}
-/* 刻度行与柱区同宽同 gap，保证文字与柱子对齐 */
-.hour-axis {
-  display: flex;
-  gap: 3px;
-  padding: 0 1px;
-  margin-top: 5px;
-}
-.hour-tick {
-  flex: 1 1 0;
-  text-align: center;
-  font-size: var(--fs-micro);
-  color: var(--muted-2);
-  font-variant-numeric: var(--tnum);
-}
-.hour-hint {
-  margin: 8px 0 0;
-  font-size: var(--fs-micro);
-  line-height: 1.6;
-  color: var(--muted-2);
-}
-/* 单账号逐小时：文字列表而非第二张图 —— 这里要看精确数值，不是形状 */
-.hour-row > td {
-  padding: 0 12px 12px;
-  background: var(--panel-2);
-}
-/* 表格里的「展开」按钮比常规 small 更紧一档，避免把行撑高 */
-.hour-toggle {
-  padding: 3px 9px;
-  font-size: var(--fs-xs);
-}
-.acct-hours {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.acct-hours li {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: var(--fs-xs);
-  font-variant-numeric: var(--tnum);
-}
-.acct-hours .ah-hour {
-  color: var(--muted-2);
-}
-.acct-hours .ah-consumed,
-.acct-hours .ah-gained {
-  min-width: 52px;
-  text-align: right;
-}
-
 /* ── 窄窗口适配 ───────────────────────────────────────────── */
 /* 设置卡左右分栏在窄窗口下改为上下堆叠，否则右栏被挤到无法阅读 */
 @media (max-width: 860px) {

@@ -19,7 +19,7 @@ import { accountLabel, tally, type ConfirmReq, type Toast } from "./common";
 import { nextUpdateNotice, probeUpdate, type UpdateNotice } from "./updater";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TakeoverPage } from "./pages/TakeoverPage";
-import { ReportsPage } from "./pages/ReportsPage";
+import { BriefingPage } from "./pages/BriefingPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import {
@@ -43,14 +43,14 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
  * （网络急救已作为一张卡并入设置页，见 NetfixCard）；
  * 弹窗只留给「做完即走」的任务流（登录新账号、导入本机账号、危险操作确认）。
  */
-type Page = "accounts" | "takeover" | "reports" | "logs" | "settings";
+type Page = "accounts" | "takeover" | "briefing" | "logs" | "settings";
 
 type Modal = { type: "local" } | { type: "oauth" } | null;
 
 const NAV: { key: Page; label: string }[] = [
   { key: "accounts", label: "账号签到" },
   { key: "takeover", label: "智能接管" },
-  { key: "reports", label: "积分日报" },
+  { key: "briefing", label: "积分简报" },
   { key: "logs", label: "签到日志" },
   { key: "settings", label: "设置" },
 ];
@@ -58,7 +58,7 @@ const NAV: { key: Page; label: string }[] = [
 const PAGE_ICON: Record<Page, ReactNode> = {
   accounts: <IconCheck />,
   takeover: <IconSwap />,
-  reports: <IconActivity />,
+  briefing: <IconActivity />,
   logs: <IconList />,
   settings: <IconGear />,
 };
@@ -66,7 +66,7 @@ const PAGE_ICON: Record<Page, ReactNode> = {
 const PAGE_TITLES: Record<Page, string> = {
   accounts: "账号签到",
   takeover: "智能接管",
-  reports: "积分日报",
+  briefing: "积分简报",
   logs: "签到日志",
   settings: "设置",
 };
@@ -227,19 +227,11 @@ export default function App() {
     };
   }, [load, showToast]);
 
-  // 每日积分日报由后端调度线程在设定时刻（默认 12:00）结算，完成后提示一声。
-  // 日报列表由「积分日报」页自己拉取，这里只负责让用户知道后台刚做了什么。
-  useEffect(() => {
-    const un = listen<{ count?: number }>("credit-report-settled", (e) => {
-      showToast({
-        kind: "info",
-        text: `积分日报已结算（${e.payload.count ?? 0} 个账号）`,
-      });
-    });
-    return () => {
-      void un.then((f) => f());
-    };
-  }, [showToast]);
+  // 积分简报由后端调度线程每小时固化一次，事件由「积分简报」页自己监听并刷新列表。
+  //
+  // 这里**故意不弹提示**：每小时弹一次就是噪音，而简报本来就是「回来看历史」的东西，
+  // 用户不需要在写别的代码时被通知「又攒了一条时条目」。真正值得打扰的是每日推送
+  // （走 webhook），那部分由后端负责。
 
   const runCheckinOne = useCallback(
     async (id: string) => {
@@ -556,8 +548,8 @@ export default function App() {
               onToast={showToast}
             />
           )}
-          {page === "reports" && settings && (
-            <ReportsPage
+          {page === "briefing" && settings && (
+            <BriefingPage
               settings={settings}
               askConfirm={askConfirm}
               onSettings={setSettings}

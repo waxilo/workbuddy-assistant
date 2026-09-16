@@ -72,21 +72,20 @@ export interface Settings {
   /** 手动「全部签到」的间隔上限（秒），实际在 2..=max 之间取值 */
   manual_stagger_max_seconds: number;
   /**
-   * 是否开启每日积分日报。
+   * 是否开启积分简报（后台每小时结算一次时条目）。
    *
-   * 这个开关的入口在**积分日报页**（那一页才是它的主场），不在设置页。
-   * 开启时会清掉已有的日报与快照，并用此刻读数打一条**系统快照**当基线
-   * （见 `enableCreditReports`），因此列表不会出现「历史与新基线混在一起」。
+   * 这个开关的入口在**积分简报页**（那一页才是它的主场），不在设置页。
+   * 开启时会清掉已有的简报与台账里的小时桶，并用此刻读数**只对齐基线**
+   * （见 `enableCreditBriefing`），因此列表不会出现「历史与新基线混在一起」。
    */
-  report_enabled: boolean;
-  /** 日报结算时刻，固定 24:00（后端强制覆盖，前端只读展示） */
-  report_time: string;
+  briefing_enabled: boolean;
   /**
-   * 日报是否推送到 webhook（复用通知总开关与地址）。
+   * 简报是否推送到 webhook（复用通知总开关与地址）。
    *
+   * 粒度是**天**：时条目每小时就在结算，但「今天花了多少」要等当天结束才有定论。
    * 在设置页与两条签到通知开关并排展示 —— 「哪些东西会推送」集中一处才好核对。
    */
-  notify_on_report: boolean;
+  notify_on_briefing: boolean;
 }
 
 /**
@@ -257,104 +256,62 @@ export interface FreeModelsReport {
   source: "fetched" | "cache" | "fallback";
 }
 
-/** 积分日报里的一行：某个账号在窗口内的消耗与新增 */
-export interface CreditReportAccount {
+/**
+ * 简报里的一行：某个账号在一段时间（一条时条目 / 一天）里的动静。
+ *
+ * 「消耗」与「新增」都取自接口里资源包的**累计**字段（`CapacityUsed` / `CapacitySize`）
+ * 的增量 —— 累计量只增不减，所以多个客户端同时消耗也都能算进来，
+ * 不需要按请求归因，并发也不会算错。
+ */
+export interface BriefAccount {
   account_id: string;
   name: string;
   phone: string | null;
-  /** 当天消耗（Σ 当天小时桶；下标 = 小时） */
   consumed: number;
-  /** 当天新增（Σ 当天小时桶，含签到发的包） */
   gained: number;
-  /** 结算时点的剩余积分（取不到为 null） */
+  /** 读数时刻的剩余积分（取不到为 null —— 不谎报 0） */
   balance: number | null;
-  /** 结算时点仍在计量的资源包个数 */
-  packages: number;
-  /** 该账号在这一天的 24 个消耗桶（下标 = 小时，未采样的小时为 0） */
-  hours_consumed: number[];
-  /** 该账号在这一天的 24 个新增桶 */
-  hours_gained: number[];
 }
 
-/** 某一天里某个小时的合计（只列有数据的时点） */
-export interface HourTotal {
-  /** 小时（0–23） */
+/**
+ * 一条**时条目**：某一天某一个小时的消耗与新增，带**逐账号明细**。
+ *
+ * 这是简报唯一的落盘数据，由后台每小时结算一次：
+ * 整点前采一次样（让这一小时的增量落进即将结束的那个小时），整点后固化。
+ * 界面上没有任何「手动生成一条」的入口。
+ */
+export interface HourEntry {
+  /** 归属日期 YYYY-MM-DD */
+  date: string;
+  /** 归属小时（0–23） */
   hour: number;
-  consumed: number;
-  gained: number;
-}
-
-/**
- * 一条每日积分日报。口径 = **自然日 00:00–24:00**。
- *
- * 「消耗」与「新增」都取自接口里资源包的**累计**字段（`CapacityUsed` / `CapacitySize`）
- * 的增量，按采样时刻归入所属小时，所以多个客户端同时消耗都能算进来，
- * 不需要按请求归因，并发也不会算错。
- *
- * 小时桶在采样时就已归位，因此「按天」和「按小时」是同一份数据的两种聚合：
- * 小时之和恒等于当天合计，相邻两天可直接相加。
- */
-export interface CreditReport {
-  /** 结算日 YYYY-MM-DD（列表按它倒序） */
-  date: string;
-  /** 该条日报的生成时刻（当天 12:00 或手动结算） */
+  /** 固化时刻（本地时间串） */
   generated_at: string;
-  /** 窗口起点，固定为当天 00:00:00 */
-  window_from: string;
-  /** 窗口终点：当天为生成时刻（还没走完），封口后为次日 00:00:00 */
-  window_to: string;
-  /** 自然日是否已走完 */
-  sealed: boolean;
-  /** 0 = 逐小时数据实测可用；1 = 自然日口径上线时对当天做的补算，无小时明细 */
-  granularity: number;
-  accounts: CreditReportAccount[];
-  total_consumed: number;
-  total_gained: number;
-  /** 全部账号剩余积分合计；一个都取不到时为 null（不谎报 0） */
-  total_balance: number | null;
-  /** 当天每小时合计（只列有数据的时点） */
-  hours: HourTotal[];
+  consumed: number;
+  gained: number;
+  /** 该小时结束时全部账号的剩余积分合计；都取不到时为 null */
+  balance: number | null;
+  /** 这一小时里**有动静**的账号（按消耗降序），没动静的不进列表 */
+  accounts: BriefAccount[];
 }
 
 /**
- * 一条积分快照：**某一刻的读数**，而不是「一天的聚合」。
+ * 一条**日条目**：当天所有时条目之和，**读的时候现算、不落盘**。
  *
- * 与 [`CreditReport`] 的关键区别是它不做任何按天聚合 —— `consumed` / `gained` 是
- * **从装机到那一刻的累计量**，所以两条快照相减就是这段时间的真实增量，
- * 这才使得「手动打一枪 → 过一阵再打一枪 → 看差了多少」成立。
- *
- * 正因为是累计量而不是余额，`gained` 与 `consumed` 各自独立、互不抵消
- * （余额相减会被「先消耗后签到」抹平）。
+ * 这样「日 = 时之和」是结构上的事实，不可能出现「日条目与它下面的时条目对不上」。
  */
-export interface CreditSnapshot {
-  /** 打这一枪的时刻 YYYY-MM-DD HH:MM:SS */
-  at: string;
-  /** 它属于哪一天（YYYY-MM-DD），仅用于展示 */
+export interface DayEntry {
+  /** 归属日期 YYYY-MM-DD（列表按它倒序） */
   date: string;
-  /**
-   * 来源。决定它在列表里的地位与被谁覆盖：
-   * - `system`：次日封口产生的完整自然日，是**锚点**；
-   * - `manual`：「当前累计」按钮打的一次性读数。
-   */
-  kind: "system" | "manual";
-  /** 截至此刻的**累计**消耗（不是余额！） */
+  /** 这个自然日是否已经走完（今天为 false ⇒ 界面显示「进行中」） */
+  sealed: boolean;
   consumed: number;
-  /** 截至此刻的**累计**新增 */
   gained: number;
-  /** 截至此刻全部账号剩余积分合计；一个都取不到时为 null */
+  /** 当天最后一个有时点读数的小时的余额合计 —— 「这天结束时还剩多少」 */
   balance: number | null;
-  /** 参与统计的账号数 */
-  accounts: number;
+  /** 当天全部时条目（按小时升序） */
+  hours: HourEntry[];
+  /** 当天各账号的合计（由时条目相加而来，按消耗降序） */
+  accounts: BriefAccount[];
 }
 
-/** 两条快照之间的增量（较晚 − 较早）。回答「这段时间到底用了多少」 */
-export interface SnapshotDiff {
-  /** 参照的那条（较早） */
-  from_at: string;
-  /** 当前这条（较晚） */
-  to_at: string;
-  /** 两条之间的时间跨度（秒） */
-  span_seconds: number;
-  consumed: number;
-  gained: number;
-}
