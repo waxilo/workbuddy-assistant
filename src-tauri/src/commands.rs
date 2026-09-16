@@ -1,5 +1,6 @@
 use crate::accounts::{self, Account, Settings};
 use crate::auth_file::{self, LocalAccount};
+use crate::briefing;
 use crate::checkin;
 use crate::ledger;
 use crate::logs::{self, CheckinLog};
@@ -767,10 +768,6 @@ pub(crate) fn restart_workbuddy_process(app: &AppHandle) -> Result<(), String> {
 fn normalize_settings(mut settings: Settings) -> Result<Settings, String> {
     settings.schedule_time = accounts::normalize_time(&settings.schedule_time)
         .ok_or_else(|| "定时签到时刻格式应为 HH:MM（例如 09:07）".to_string())?;
-    // 日报结算时刻**锁死 24:00**：结算时刻就是统计窗口边界，只有 24:00 等于完整自然日。
-    // 这里不做格式校验而是直接覆盖 —— 用户已经没有修改入口，残留的旧值（如 12:00）
-    // 也应当被纠正，否则升级上来的老配置会继续按半天口径结算。
-    settings.report_time = accounts::REPORT_TIME.to_string();
     settings.notify_webhook = settings.notify_webhook.trim().to_string();
     // 风控间隔上限：钳制到合理区间，防手滑填 0（退化成无间隔）或填超大值
     settings.stagger_max_seconds = settings.stagger_max_seconds.clamp(2, 600);
@@ -958,39 +955,31 @@ pub fn clear_checkin_logs(app: AppHandle, account_id: Option<String>) -> Result<
     logs::clear_logs(&data_dir(&app), account_id.as_deref()).map_err(|e| e.to_string())
 }
 
-/// 拉一次当前数据，并进台账（顺带写小时桶），返回**今天的实时读数**。
-///
-/// **不进日报列表。** 日报列表里只放**完整自然日**（00:00–24:00，由次日封口产生），
-/// 任意两条都能直接相加。若把「至今」的半截数据也塞进去，列表里就会出现
-/// 同一天的两个值（半截 vs 全天），相加还会重复计数 —— 用户无从判断该信哪个。
-///
-/// 但它**会落盘成一条 `Manual` 快照**（见 [`credit_report_settle`]）：快照和日报是
-/// 两个不同的东西 —— 日报是「一天一条的聚合」，快照是「某一刻的读数」。快照单独存
-/// `credit_snapshots.json`、单独一块界面展示，不参与日报合计，因此不影响上面那条
-/// 「列表里只有全天」的约束，却能让用户拿两次读数相减，看清这段时间到底用了多少。
-///
-/// 台账**照常落盘**：那些小时桶是真实采样数据，是将来封口出全天日报的唯一依据，
-/// 绝不能因为别的考虑而丢掉。
-///
-/// 唯一需要照顾历史的是 `granularity`：自然日口径上线时，当天在旧口径下已经
-/// 累计过一段（旧口径把增量记在“结算基线”里，没有小时桶）。这一段的归属无法还原，
-/// 所以**归到这一天**并在快照上标注 `granularity = 1`，避免它凭空消失 ——
-/// 宁可让数字偏大且被如实标注，也不要让用户看到自己刚花掉的积分不见了。
-pub(crate) async fn settle_report_inner(
-    app: &AppHandle,
-) -> Result<ledger::CreditReport, String> {
-    let dir = data_dir(app);
-    let accounts = accounts::load_accounts(&dir);
-    let mut led = ledger::load_ledger(&dir);
-    let now = chrono::Local::now();
-    let now_s = now.format("%Y-%m-%d %H:%M:%S").to_string();
-    let date = now.format("%Y-%m-%d").to_string();
+// ── 积分简报 ───────────────────────────────────────────────────
+//
+// 简报的口径、存储与聚合都在 `briefing` 模块里，这里只提供两个动作：
+// **采样一次**（写台账）与**固化已经走完的小时**。界面上没有任何「手动生成一条」
+// 的入口 —— 条目只由后台每小时跑一次（`scheduler::maybe_seal_briefing`）产生。
 
-    // 逐账号拉资源视图，把逐包明细并进台账（顺带写小时桶），同时记下结算时点的余额
+/// 逐账号采样一次：把逐包明细喂进台账（顺带写「当前小时」的桶），返回各账号的余额读数。
+///
+/// 这是简报**唯一**的入账路径，所以「时条目里有什么」完全由它采到的东西决定。
+/// `rebaseline = true` 时改走「只对齐基线」（见 [`ledger::rebaseline`]）：
+/// 用于「开启简报」—— 那时要的是「从现在开始算」，断档期攒下的量既不归任何小时，
+/// 也不该算进开启后的第一个小时。
+///
+/// 台账的落盘由调用方决定：采样可能整个失败（断网 / token 过期），
+/// 那种情况下也不该让调用方回滚已经发生的别的事。
+pub(crate) async fn sample_into(
+    led: &mut ledger::Ledger,
+    accounts: &[Account],
+    rebaseline: bool,
+) -> std::collections::BTreeMap<String, Option<f64>> {
     let client = crate::http::api_client();
-    let mut balances: std::collections::BTreeMap<String, Option<f64>> =
-        std::collections::BTreeMap::new();
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut balances = std::collections::BTreeMap::new();
     for (i, a) in accounts.iter().enumerate() {
+        // 账号之间留抖动：这是后台按小时跑的批量请求，零间隔连发就是脚本形态
         if i > 0 {
             crate::http::account_gap().await;
         }
@@ -998,232 +987,103 @@ pub(crate) async fn settle_report_inner(
         let view = checkin::fetch_resource_view(&client, &host, &a.token).await;
         balances.insert(a.id.clone(), view.credits);
         if !view.packages.is_empty() {
-            ledger::merge_account(
-                led.accts.entry(a.id.clone()).or_default(),
-                &view.packages,
-                &now_s,
-            );
-        }
-    }
-
-    // 把「旧口径下今天已经累计、但还没有小时桶」的那部分补进当天的 00 点桶。
-    // 只对还没有任何当天桶的账号做，且同一台机器只会发生一次（之后每天都有桶）。
-    let mut reconciled = false;
-    for a in &accounts {
-        let e = led.accts.entry(a.id.clone()).or_default();
-        let (d_used, d_granted) = ledger::reconcile_day_baseline(e, &date);
-        if d_used > 0.0 || d_granted > 0.0 {
-            reconciled = true;
-        }
-    }
-    // 长期没采样时文件里可能还留着几个月前的桶，顺带清掉（`merge_account` 每次
-    // 写入也会剪，这里兜「刚打开应用、本次还没写任何桶」的情况）
-    ledger::prune_buckets(&mut led.accts, now.date_naive());
-
-    // 当天还没走完：`sealed=false`，界面据此显示「至今」
-    let rep = ledger::build_report(
-        &led.accts,
-        &accounts,
-        &balances,
-        &date,
-        &now_s,
-        false,
-        if reconciled { 1 } else { 0 },
-    );
-
-    // 只存台账（含刚写好的小时桶与已推进的旧口径基线），**不写日报** —— 见函数头注释。
-    ledger::save_ledger(&dir, &led).map_err(|e| e.to_string())?;
-
-    // 顺手把这一刻的读数记成一条 `Manual` 快照。落盘失败不该让整个动作失败：
-    // 用户要看的读数已经在 `rep` 里了，快照只是「留着以后对比」的附加价值。
-    let snap = ledger::Snapshot {
-        at: now_s,
-        date,
-        kind: ledger::SnapshotKind::Manual,
-        consumed: rep.total_consumed,
-        gained: rep.total_gained,
-        balance: rep.total_balance,
-        accounts: accounts.len(),
-    };
-    let mut snaps = ledger::load_snapshots(&dir);
-    ledger::push_snapshot(&mut snaps, snap);
-    let _ = ledger::save_snapshots(&dir, &snaps);
-
-    Ok(rep)
-}
-
-/// 把已经过去的自然日封口成**完整一天**的日报（这是日报列表的唯一来源）。
-///
-/// 结算时刻固定 24:00，而 24:00 属于次日 —— 所以「结算昨天」在这里完成：
-/// 次日首次运行（[`crate::scheduler::maybe_settle_report`]）调它，把 `today` 之前
-/// 所有还没封口的日子补成全天。
-///
-/// **不需要额外采样**：桶早已在各自的采样时刻归位，这里只是把当天重新聚合一遍
-/// 并标记封闭。因此即便用户连着几天没打开应用，敞口也只是「日报暂时少几条」，
-/// 而**不会丢数据** —— 那些桶仍在台账里（保留 60 天），下次运行一次性补齐。
-///
-/// 返回**新封口**的日报（按日期降序），调用方据此决定推哪一条。
-pub fn seal_reports(
-    dir: &std::path::Path,
-    accounts: &[accounts::Account],
-    today: &str,
-) -> Vec<ledger::CreditReport> {
-    let led = ledger::load_ledger(dir);
-    let mut sealed_now = Vec::new();
-    let mut all = ledger::load_reports(dir);
-    for rep in all.iter_mut() {
-        if rep.sealed || rep.date.as_str() >= today {
-            continue;
-        }
-        let bal = rep
-            .accounts
-            .iter()
-            .filter_map(|r| r.balance)
-            .collect::<Vec<f64>>();
-        // 重新聚合：桶是唯一事实来源，`build_report` 会把 12:00 之后的部分补进来
-        let fresh = ledger::build_report(
-            &led.accts,
-            accounts,
-            &std::collections::BTreeMap::new(),
-            &rep.date,
-            &rep.generated_at,
-            true,
-            rep.granularity,
-        );
-        // 余额是「结算那一刻」的快照，重新聚合取不到，沿用原来的值
-        let mut merged = fresh;
-        for r in merged.accounts.iter_mut() {
-            if let Some(old) = rep.accounts.iter().find(|o| o.account_id == r.account_id) {
-                r.balance = old.balance;
+            let entry = led.accts.entry(a.id.clone()).or_default();
+            if rebaseline {
+                ledger::rebaseline(entry, &view.packages, &now);
+            } else {
+                ledger::merge_account(entry, &view.packages, &now);
             }
         }
-        merged.total_balance = if bal.is_empty() {
-            None
-        } else {
-            Some(ledger::round2_public(bal.iter().sum()))
-        };
-        *rep = merged.clone();
-        sealed_now.push(merged);
     }
-    if !sealed_now.is_empty() {
-        // 这里走的是「读全量 → 就地改 → 整体写回」，不经过任何单条写入函数，
-        // 所以要显式收口：按日期降序并截断到上限，否则日报列表会无限增长。
-        ledger::normalize_reports(&mut all);
-        // 顺带把超期的桶清掉（日报列表比桶保留期长）
-        let _ = ledger::save_reports_public(dir, &all);
-        write_system_snapshot(dir, sealed_now.first());
+    balances
+}
+
+/// 把「已经走完、还没固化」的小时从台账固化成时条目（幂等），返回本次新固化的条目。
+///
+/// 输入只有台账的小时桶，所以**不依赖网络、也不依赖此刻的余额读数**：
+/// 补算历史时 `balances` 传空表即可，那些条目的余额就是 None（界面显示 —）。
+/// 这也意味着「应用关了两天再打开」不会丢明细 —— 桶还在（留 60 天），补得出来。
+pub(crate) fn seal_hours(
+    dir: &std::path::Path,
+    accounts: &[Account],
+    balances: &std::collections::BTreeMap<String, Option<f64>>,
+    today: &str,
+    hour: u8,
+    generated_at: &str,
+) -> Vec<briefing::HourEntry> {
+    let led = ledger::load_ledger(dir);
+    let mut all = briefing::load(dir);
+    let pending = briefing::unsealed_hours(&led.accts, &all, today, hour);
+    if pending.is_empty() {
+        return Vec::new();
     }
-    sealed_now
+    let mut sealed = Vec::new();
+    for (date, h) in pending {
+        if let Some(e) = briefing::build_hour(&led.accts, accounts, balances, &date, h, generated_at)
+        {
+            briefing::upsert(&mut all, e.clone());
+            sealed.push(e);
+        }
+    }
+    if sealed.is_empty() {
+        return Vec::new();
+    }
+    // 落盘失败只意味着「这次没记住」：固化是幂等的，下一跳会重算一遍，
+    // 所以这里吞掉错误（返回的 sealed 是给界面刷新用的，不是「已持久化」的凭据）。
+    let _ = briefing::save(dir, &all);
+    sealed
 }
 
-/// 封口产出 system 快照：把「最新一条完整自然日」的读数记成锚点。
+/// 清空简报：时条目 + 台账里的小时桶。**逐包累计值必须留着。**
 ///
-/// 为什么要有它：`Manual` 快照提供不了长期参照 —— 没有锚点时手动样本可以无限累积，
-/// 有锚点后只留一格（见 [`ledger::push_snapshot`]）。系统快照就是那个锚点，
-/// 且它每天只被最新的一条替换，所以快照区永远清爽。
+/// 为什么连桶一起清：时条目是「从桶固化出来的」，只清条目的话下一次调度就会把它们
+/// 原样重建出来 —— 用户会看到「清空」在 30 秒后自己撤销。
 ///
-/// 落盘失败只影响「以后能不能对比」，不该让结算本身失败，故吞掉错误。
-fn write_system_snapshot(dir: &std::path::Path, latest: Option<&ledger::CreditReport>) {
-    let Some(rep) = latest else { return };
-    let snap = ledger::Snapshot {
-        at: rep.generated_at.clone(),
-        date: rep.date.clone(),
-        kind: ledger::SnapshotKind::System,
-        consumed: rep.total_consumed,
-        gained: rep.total_gained,
-        balance: rep.total_balance,
-        accounts: rep.accounts.len(),
-    };
-    let mut snaps = ledger::load_snapshots(dir);
-    ledger::push_snapshot(&mut snaps, snap);
-    let _ = ledger::save_snapshots(dir, &snaps);
+/// 为什么累计值不能清：`CapacityUsed` 是接口侧的**装机以来累计量**，清掉它下次采样
+/// 就会把这一整笔总量算成「此刻这一小时的消耗」，清空反而凭空多出一笔账。
+fn clear_briefing_history(dir: &std::path::Path) -> std::io::Result<()> {
+    briefing::clear(dir)?;
+    let mut led = ledger::load_ledger(dir);
+    for a in led.accts.values_mut() {
+        a.clear_hours();
+    }
+    ledger::save_ledger(dir, &led)
 }
 
-/// 查询积分日报（新的在前）
+/// 积分简报的日条目（新的在前）。
+///
+/// 日条目**不落盘**，由时条目现算（[`briefing::day_entries`]）：这样「日 = 时之和」
+/// 是结构上的事实，不可能出现「日条目和它下面的时条目对不上」这种最没得解释的 bug。
 #[tauri::command]
-pub fn credit_reports(app: AppHandle) -> Result<Vec<ledger::CreditReport>, String> {
-    Ok(ledger::load_reports(&data_dir(&app)))
-}
-
-/// 清空日报历史（不影响积分台账与结算基线）
-#[tauri::command]
-pub fn credit_reports_clear(app: AppHandle) -> Result<(), String> {
-    ledger::clear_reports(&data_dir(&app)).map_err(|e| e.to_string())
-}
-
-/// 拉一次**当前累计读数**（「当前累计」按钮）。
-///
-/// 效果有两层：
-/// 1. 实时重拉一遍接口、把逐包明细并进台账（顺带写小时桶），返回「到今天此刻」的
-///    消耗/新增/剩余 —— 界面据此弹窗展示；
-/// 2. 把这一刻的读数落盘成一条 `Manual` 快照，供以后和别的快照相减看增量。
-///
-/// **不写 `credit_reports.json`** —— 日报列表只收完整自然日，理由见 [`settle_report_inner`]。
-/// 命令名沿用 `credit_report_settle` 以兼容前端。
-#[tauri::command]
-pub async fn credit_report_settle(app: AppHandle) -> Result<ledger::CreditReport, String> {
-    settle_report_inner(&app).await
-}
-
-/// 快照列表（新的在前），供日报页的「快照」区展示。
-#[tauri::command]
-pub fn credit_snapshots(app: AppHandle) -> Result<Vec<ledger::Snapshot>, String> {
-    Ok(ledger::load_snapshots(&data_dir(&app)))
-}
-
-/// 把每一条快照与它**前面那一条**配对求差（口径见 [`ledger::snapshot_diffs`]）。
-///
-/// 返回 `Vec<(快照下标, 增量)>`：下标记的是「较晚那条」在 `credit_snapshots`
-/// 返回数组里的位置，前端按它把增量贴到对应行上。最老的一条没有前辈，不出现在结果里。
-#[tauri::command]
-pub fn credit_snapshot_diffs(
-    app: AppHandle,
-) -> Result<Vec<(usize, ledger::SnapshotDiff)>, String> {
-    Ok(ledger::snapshot_diffs(&ledger::load_snapshots(&data_dir(&app))))
-}
-
-/// 清空全部快照（含系统锚点）。不影响日报历史与积分台账。
-#[tauri::command]
-pub fn credit_snapshots_clear(app: AppHandle) -> Result<(), String> {
-    ledger::save_snapshots(&data_dir(&app), &[]).map_err(|e| e.to_string())
-}
-
-/// 开启积分日报：**清历史 → 立即拉一次接口 → 把此刻读数落成第一条系统快照**。
-///
-/// 用户不必等到「明天首次打开应用」才看到第一条 —— 开启的那一刻就有了基线。
-/// 这条基线也是**对比的起点**：以后每天封口推一条 system 快照，system 只留最新，
-/// 所以列表里始终是「最新一天 + 你手动打的那枪」两行，干净且可比。
-///
-/// **清的是日报与快照，不是台账。** 台账里的小时桶是真实采样数据，
-/// 也是将来算「某一天消耗」的唯一依据；接口的 `CapacityUsed` 是装机以来的累计量，
-/// 清掉台账下次采样就会把这笔总量整个塞进当天，反而凭空多出一大笔。
-/// 详见 [`ledger::clear_reports_and_snapshots`]。
-///
-/// 顺序上**必须先清再采样**：反过来的话刚写进去的第一条基线会被自己清掉。
-/// 采样走 [`settle_report_inner`]，它会顺带把逐包明细并进台账（写小时桶），
-/// 但**不写日报历史** —— 日报列表只收完整自然日。
-#[tauri::command]
-pub async fn credit_reports_enable(app: AppHandle) -> Result<ledger::CreditReport, String> {
+pub fn credit_briefing(app: AppHandle) -> Result<Vec<briefing::DayEntry>, String> {
     let dir = data_dir(&app);
-    ledger::clear_reports_and_snapshots(&dir).map_err(|e| e.to_string())?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    Ok(briefing::day_entries(&briefing::load(&dir), &today))
+}
 
-    let rep = settle_report_inner(&app).await?;
+/// 清空简报历史（时条目 + 台账里的小时桶；逐包累计值保留）
+#[tauri::command]
+pub fn credit_briefing_clear(app: AppHandle) -> Result<(), String> {
+    clear_briefing_history(&data_dir(&app)).map_err(|e| e.to_string())
+}
 
-    // `settle_report_inner` 落下的是 `Manual` 快照（它不知道这是「开启」这一枪）。
-    // 开启后的第一条应该是**系统锚点** —— 只有系统快照才能压低手动快照的数量、
-    // 也只有它是「完整自然日」口径。所以这里把它升级成 System。
-    let snaps = vec![ledger::Snapshot {
-        at: rep.generated_at.clone(),
-        date: rep.date.clone(),
-        kind: ledger::SnapshotKind::System,
-        consumed: rep.total_consumed,
-        gained: rep.total_gained,
-        balance: rep.total_balance,
-        accounts: rep.accounts.len(),
-    }];
-    ledger::save_snapshots(&dir, &snaps).map_err(|e| e.to_string())?;
-
-    Ok(rep)
+/// 「开启积分简报」：清历史 → 立刻采一次样 → **只对齐基线**（不记这一段增量）。
+///
+/// 顺序不能反：先采样再清的话，刚采出来的那一段增量会被清掉，而基线已经推到「采完」
+/// 的位置 —— 那一段消耗就永久消失了。
+///
+/// 采样走 rebaseline 而不是正常记账，理由见 [`sample_into`]。
+#[tauri::command]
+pub async fn credit_briefing_enable(app: AppHandle) -> Result<(), String> {
+    let dir = data_dir(&app);
+    clear_briefing_history(&dir).map_err(|e| e.to_string())?;
+    let accounts = accounts::load_accounts(&dir);
+    if accounts.is_empty() {
+        return Ok(());
+    }
+    let mut led = ledger::load_ledger(&dir);
+    sample_into(&mut led, &accounts, true).await;
+    ledger::save_ledger(&dir, &led).map_err(|e| e.to_string())
 }
 
 /// 当前应用版本（用于“关于/更新”展示）

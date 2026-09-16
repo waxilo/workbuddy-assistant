@@ -147,23 +147,23 @@ pub struct Settings {
     /// 429 原样透传、不记冷却，该会话不会被切到别的账号上。
     #[serde(default = "default_true")]
     pub failover_on_rate_limit: bool,
-    /// 每日积分日报：次日首次运行时结算「昨天」。
+    /// 积分简报：后台每小时结算一次时条目，日条目是当天时条目之和。
     ///
-    /// 日报统计的是**完整自然日**（00:00–24:00）。当天还没走完时结不出全天数字，
-    /// 所以结算动作落在次日，把昨天整条封口并推送（见 `scheduler::maybe_settle_report`）。
-    #[serde(default = "default_true")]
-    pub report_enabled: bool,
-    /// 日报结算时刻：**固定 24:00，不允许用户修改**。
+    /// 开关的入口在**积分简报页**（那一页才是它的主场），不在设置页。
+    /// 开启时会清掉已有的简报与台账里的小时桶，并用此刻读数**只对齐基线**
+    /// （见 `ledger::rebaseline`）—— 断档期攒下的增量既归不到具体的小时、
+    /// 又不该算进开启后的第一个小时，宁可不记。
     ///
-    /// 这个字段保留是为了兼容旧配置文件的读取，写入时一律被 [`REPORT_TIME`] 覆盖。
-    /// 之所以不再开放自定义：结算时刻就是统计窗口的边界，只有 24:00 才等于
-    /// 「一个完整自然日」；设成别的值会让当天那条不是全天，用户还得等次日封口二次修正，
-    /// 数字前后不一致。锁死它，日报列表里每条都是可直接相加的完整一天。
-    #[serde(default = "default_report_time")]
-    pub report_time: String,
-    /// 日报是否推送到 webhook（复用通知总开关 `notify_enabled` 与 `notify_webhook`）
-    #[serde(default = "default_true")]
-    pub notify_on_report: bool,
+    /// `alias` 是为了让升级上来的旧配置（键名还是 `report_enabled`）继续生效：
+    /// 只认新键的话，用户上次关掉的开关会在升级后被悄悄打开。
+    #[serde(default = "default_true", alias = "report_enabled")]
+    pub briefing_enabled: bool,
+    /// 简报是否推送到 webhook（复用通知总开关 `notify_enabled` 与 `notify_webhook`）。
+    ///
+    /// 推的粒度是**天**：时条目每小时就在结算，但「今天花了多少」要等当天结束才有定论，
+    /// 每小时推一条只会把通知刷成流水账。同样带 `alias` 兼容旧键名。
+    #[serde(default = "default_true", alias = "notify_on_report")]
+    pub notify_on_briefing: bool,
 }
 
 impl Default for Settings {
@@ -188,23 +188,10 @@ impl Default for Settings {
             manual_stagger: true,
             manual_stagger_max_seconds: default_manual_stagger_max(),
             failover_on_rate_limit: true,
-            report_enabled: true,
-            report_time: default_report_time(),
-            notify_on_report: true,
+            briefing_enabled: true,
+            notify_on_briefing: true,
         }
     }
-}
-
-/// 日报结算时刻：**固定 24:00**，用户不可改。
-///
-/// 结算时刻＝统计窗口边界。只有 24:00 才让当天那条等于「一个完整自然日」，
-/// 列表里任意两条都能直接相加。若允许改小（例如 12:00），当天那条就只是
-/// 「至此刻」，真正全天数字要等次日封口才出现 —— 同一个日期前后两个不同的值，
-/// 用户无从判断该信哪个。所以这里不给选择，写入时一律覆盖成这个值。
-pub const REPORT_TIME: &str = "24:00";
-
-fn default_report_time() -> String {
-    REPORT_TIME.to_string()
 }
 
 /// 风控随机间隔默认上限：45 秒足够打散节奏，又不至于让「全部签到」等太久
@@ -365,10 +352,25 @@ mod tests {
         assert_eq!(s.manual_stagger_max_seconds, 8);
         // 限流换号默认保持开启 = 与升级前的行为一致（关掉才是主动选的防御姿态）
         assert!(s.failover_on_rate_limit);
-        // 积分日报：默认开启、结算时刻固定 24:00、跟着推送一起发（老配置没有这些字段）
-        assert!(s.report_enabled);
-        assert_eq!(s.report_time, "24:00");
-        assert!(s.notify_on_report);
+        // 积分简报：默认开启、跟着推送一起发（老配置没有这些字段）
+        assert!(s.briefing_enabled);
+        assert!(s.notify_on_briefing);
+    }
+
+    /// 升级路径：旧配置里的键名是 `report_enabled` / `notify_on_report`，
+    /// 必须**继续生效**。只认新键的话，用户上次关掉的简报会在升级后被悄悄打开 ——
+    /// 这种「设置被重置」只会被当成「版本越更越不对劲」，很难联想到是键名换了。
+    #[test]
+    fn legacy_report_field_names_still_take_effect() {
+        let s: Settings =
+            serde_json::from_str(r#"{"report_enabled":false,"notify_on_report":false}"#).unwrap();
+        assert!(!s.briefing_enabled);
+        assert!(!s.notify_on_briefing);
+
+        // 写回去时用新键名，旧键不再出现（alias 只作用于读）
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("briefing_enabled"));
+        assert!(!json.contains("\"report_enabled\""));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 mod accounts;
 mod auth_file;
+mod briefing;
 mod checkin;
 mod commands;
 mod http;
@@ -81,16 +82,12 @@ pub fn run() {
             commands::set_autostart,
             commands::get_checkin_logs,
             commands::clear_checkin_logs,
-            // 积分日报：次日封口昨天（完整自然日），口径见 ledger 模块
-            commands::credit_reports,
-            commands::credit_reports_clear,
-            // 开启日报：清历史 + 立刻落一条 system 基线（用户不必等次日）
-            commands::credit_reports_enable,
-            commands::credit_report_settle,
-            // 积分快照：某一刻的读数，可与前一条相减看增量（不进日报合计）
-            commands::credit_snapshots,
-            commands::credit_snapshot_diffs,
-            commands::credit_snapshots_clear,
+            // 积分简报：日条目 = 当天时条目之和（现算），口径见 briefing 模块。
+            // 条目只由后台每小时结算一次，这里没有「手动生成一条」的入口。
+            commands::credit_briefing,
+            commands::credit_briefing_clear,
+            // 开启简报：清历史 + 采一次样**只对齐基线**（断档期增量不记）
+            commands::credit_briefing_enable,
             commands::app_version,
             // 网络急救：扫出「调试残留的全局服务端点」并一键清除（含关闭本地反代）
             netfix::net_diagnose,

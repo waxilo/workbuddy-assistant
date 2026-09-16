@@ -21,15 +21,16 @@
 //!
 //! 通知只在 `notify_enabled && notify_on_schedule` 时发送，且**失败不影响签到**。
 //!
-//! 除定时签到外，本模块还管两件事，各自有独立开关与时刻、互不影响：
+//! 除定时签到外，本模块还管两件事，各自有独立开关，互不影响：
 //!
 //! - 自动续签（见 [`maybe_auto_refresh`]）：剩余有效期不足 48 小时就静默续一次。
-//! - **每日积分日报**（见 [`maybe_settle_report`]）：到点结算「上次结算以来」的
-//!   消耗与新增，并按 `notify_on_report` 推送。它**没有随机时间窗** —— 触发时刻
-//!   就是统计窗口的边界，抖动会让相邻两天的日报无法直接相加。统计口径见
-//!   [`crate::ledger`] 的模块说明。
+//! - **积分简报**（见 [`maybe_seal_briefing`]）：每小时采一次样，把已经走完的小时
+//!   固化成「时条目」，并按 `notify_on_briefing` 每天推一条当天汇总。
+//!   它**没有随机时间窗** —— 触发时刻就是「哪一个小时」这件事本身，抖动会让同一段
+//!   增量前后归到不同的小时里。统计口径见 [`crate::briefing`] 与 [`crate::ledger`]。
 
 use crate::accounts::{self, Settings};
+use crate::briefing;
 use crate::commands;
 use crate::ledger;
 use crate::notify;
@@ -46,12 +47,18 @@ const TICK: Duration = Duration::from_secs(30);
 const CATCH_UP_MINUTES: i64 = 30;
 /// 自动续签的扫描间隔：token 有效期 60 天，12 小时一跳足够从容
 const REFRESH_SCAN_MS: i64 = 12 * 60 * 60 * 1000;
+/// 每小时第几分钟起可以采样。
+///
+/// 台账把增量归入**采样时刻所属的那个小时**，所以想让整个小时的量落进这一小时，
+/// 采样就必须赶在整点之前完成。定成「最后 5 分钟」而不是「最后一分钟」：
+/// 30s 一跳只要有一次落在窗口里就够，窗口太窄时一次系统卡顿就会整小时没有采样。
+const SAMPLE_AT_MINUTE: i64 = 55;
 /// 定时任务进度事件，前端据此刷新列表并提示
 pub const EVENT: &str = "checkin-scheduled";
 /// 自动续签事件（payload：续签成功的账号数），前端据此刷新列表
 pub const REFRESH_EVENT: &str = "auto-refreshed";
-/// 积分日报结算完成事件，前端据此刷新日报列表
-pub const REPORT_EVENT: &str = "credit-report-settled";
+/// 积分简报固化完成事件，前端据此刷新简报列表
+pub const BRIEFING_EVENT: &str = "credit-briefing-sealed";
 
 /// 当天随机挑定的定时签到时刻。
 ///
@@ -76,13 +83,18 @@ struct ScheduleState {
     /// 今天随机挑定的触发时刻（跨天自动重挑；见 [`target_time`]）
     #[serde(default)]
     today_target: Option<DayTarget>,
-    /// 最后一次给日报做每日结算的日期（`YYYY-MM-DD`）
+    /// 最后一次积分简报采样所属的小时（`YYYY-MM-DD HH`）
     ///
-    /// 结算时刻固定 24:00（见 [`accounts::REPORT_TIME`]），而 24:00 属于次日，
-    /// 因此这一字段实际记录的是「今天是否已经把过去的自然日算完了」——
-    /// 每天一次、不看具体时分、不依赖网络。
+    /// 用来保证**每小时只采一次**：采样窗口有 5 分钟、轮询 30s 一跳，
+    /// 没有这个标记就会在窗口里连采十来次（每次都打一遍接口）。
     #[serde(default)]
-    last_seal_date: Option<String>,
+    last_sample_hour: Option<String>,
+    /// 最后一次推送简报的日期（`YYYY-MM-DD`）
+    ///
+    /// 推送粒度是**天**（时条目每小时结算，但「今天花了多少」要等当天结束才有定论），
+    /// 所以每天最多一条。先落盘再推送：推送失败也不该让同一份简报反复重推。
+    #[serde(default)]
+    last_briefing_push_date: Option<String>,
 }
 
 fn state_file(dir: &Path) -> PathBuf {
@@ -174,9 +186,9 @@ fn refresh_scan_due(last_scan_ms: Option<i64>, now_ms: i64) -> bool {
 ///
 /// 抽成纯函数以便单测——时间判断最容易在边界上出错（跨天、未来时刻、重复跑）。
 ///
-/// **只服务定时签到。** 日报不走这里：它的结算时刻固定 24:00，而 `NaiveTime`
-/// 表示不了 24:00（合法范围到 `23:59:59`），传进来必然解析失败而永不触发；
-/// 日报改用「次日首次运行结算昨天」的判定，见 [`maybe_settle_report`]。
+/// **只服务定时签到。** 简报不走这里：它按「整点」结算，而 `NaiveTime`
+/// （合法范围到 `23:59:59`）表示不了 24:00 这种边界；简报改用「这一小时采过没有」
+/// 的判定，见 [`maybe_seal_briefing`]。
 pub(crate) fn due_at(
     now: chrono::NaiveDateTime,
     time: &str,
@@ -202,6 +214,11 @@ pub fn spawn(app: AppHandle) {
         std::thread::sleep(Duration::from_secs(5));
         if let Ok(dir) = commands::try_data_dir(&app) {
             maybe_auto_refresh(&app, &dir);
+            // 启动就把简报补一遍。固化只读台账、不需要网络，而应用关着的那些小时
+            // 只有在这一刻才补得出来；顺带采一次样，让「上次运行到现在」的增量
+            // 落进当前小时（用户一打开就能看到今天的最新数字，而不是等下一个整点）。
+            let settings = accounts::load_settings(&dir);
+            maybe_seal_briefing(&app, &dir, &settings, true);
         }
 
         loop {
@@ -216,9 +233,9 @@ pub fn spawn(app: AppHandle) {
             // 自动续签与「定时签到」开关无关，单独判定
             maybe_auto_refresh(&app, &dir);
 
-            // 积分日报同理：有自己的开关与时刻，不受「定时签到」影响。
-            // 必须放在下面那个 continue 之前 —— 否则用户一关定时签到，日报也顺带没了
-            maybe_settle_report(&app, &dir, &settings);
+            // 积分简报同理：有自己的开关，不受「定时签到」影响。
+            // 必须放在下面那个 continue 之前 —— 否则用户一关定时签到，简报也顺带没了
+            maybe_seal_briefing(&app, &dir, &settings, false);
 
             if !settings.schedule_enabled {
                 continue;
@@ -288,80 +305,99 @@ fn maybe_auto_refresh(app: &AppHandle, dir: &Path) {
     }
 }
 
-/// 每日积分日报：**次日结算「昨天」**，并按设置推送。
+/// 积分简报：**每小时结算一次**（时条目），并按设置每天推一条当天汇总。
 ///
-/// 结算时刻固定 24:00（[`accounts::REPORT_TIME`]，用户不可改）。24:00 不是一个
-/// 能「到点触发」的时刻 —— 它已经是次日的 00:00，而且 [`due_at`] 用的
-/// `NaiveTime` 根本表示不了 24:00。所以这里不走去点判定，而是换个说法：
+/// 两件事，各自独立判定：
 ///
-/// **当天走完（= 到了次日）后的第一次运行，把昨天封口。**
+/// 1. **采样**（[`commands::sample_into`]）：安排在每小时的**最后几分钟**
+///    （`SAMPLE_AT_MINUTE` 之后）。这不是随手定的时刻 —— 台账的规则是「增量归入
+///    采样时刻所属的那个小时」，所以想让整个小时的量都落进这一小时，采样就必须
+///    赶在整点之前完成。`at_startup` 为真时（应用刚起来）不管窗口直接采一次：
+///    用户一打开就该看到今天的最新数字，而不是干等到下一个整点。
+/// 2. **固化**（[`commands::seal_hours`]）：把所有「已经走完、台账里有数据、
+///    还没固化」的小时变成时条目。它只读台账，**不依赖网络**，所以即便这一轮采样
+///    全失败，之前采到的部分照样能固化；应用关了两天再打开，那两天也补得出来
+///    （桶留 60 天）。固化是幂等的，每跳都跑一遍没有副作用。
 ///
-/// 这样每条日报都是一个**完整自然日**（00:00–24:00），列表里任意两条都能直接相加，
-/// 也不会出现「同一个日期先看到半天、次日又变成全天」的前后不一致。
+/// 代价与边界：**应用没运行的时段不会采样**，那几格既不会产生时条目、日条目里也没有
+/// 那一块。恢复运行后的第一次采样会把这段空白期攒下的增量整块记进「恢复后的那个小时」
+/// —— 这是台账的既有口径（界面上的说明照实写了这一条），丢掉它会让总消耗少算。
 ///
-/// 代价是推送时间变成「次日首次打开应用时」——这正是「结算时刻 24:00」的应有之义：
-/// 全天数字只有当天结束后才算得出来。若用户想随时看当前累计，用界面上的「当前累计」，
-/// 那是一次性快照、不落盘。
-///
-/// 封口不依赖任何网络请求（桶早在采样时就归位了，这里只是重新聚合），
-/// 所以每天第一跳就能完成，不受账号在线状态影响。
-fn maybe_settle_report(app: &AppHandle, dir: &Path, settings: &Settings) {
-    if !settings.report_enabled {
+/// 推送只推**已经走完的那一天**：时条目每小时都在结算，但「今天花了多少」要等当天
+/// 结束才有定论，每小时推一条只会把通知刷成流水账。
+fn maybe_seal_briefing(app: &AppHandle, dir: &Path, settings: &Settings, at_startup: bool) {
+    if !settings.briefing_enabled {
         return;
     }
-    let mut state = load_state(dir);
-    let now = chrono::Local::now().naive_local();
-    let today = now.date().format("%Y-%m-%d").to_string();
-
-    // 每天只做一次。先落盘再推送：推送失败/中断都不该让同一天重复结算。
-    if state.last_seal_date.as_deref() == Some(today.as_str()) {
-        return;
-    }
-
     let Ok(data_dir) = commands::try_data_dir(app) else {
-        log_event(dir, "日报结算跳过：数据目录不可用");
+        log_event(dir, "积分简报跳过：数据目录不可用");
         return;
     };
     let accounts = accounts::load_accounts(&data_dir);
-    let sealed = commands::seal_reports(&data_dir, &accounts, &today);
-
-    state.last_seal_date = Some(today.clone());
-    save_state(dir, &state);
-
-    if sealed.is_empty() {
-        // 昨天没产生任何数据（或已封口过）——不打扰用户，也不推空日报
+    if accounts.is_empty() {
         return;
     }
 
-    let total_days = sealed.len();
-    let latest = sealed.first().cloned();
-    log_event(
-        &data_dir,
-        &format!(
-            "已结算 {} 天的日报（结算时刻 {REPORT_TIME}，每条均为完整自然日）",
-            total_days,
-            REPORT_TIME = accounts::REPORT_TIME,
-        ),
-    );
-    let _ = app.emit(
-        REPORT_EVENT,
-        serde_json::json!({ "sealed": total_days }),
-    );
+    let now = chrono::Local::now().naive_local();
+    let today = now.date().format("%Y-%m-%d").to_string();
+    let hour = now.hour() as u8;
+    let now_s = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let cur_key = format!("{today} {hour:02}");
 
-    // 只推最新那条（通常是昨天）。补算了多天时，前面的天是历史欠账，
-    // 一次性推出去会把通知刷屏，用户真正关心的是刚结束的那一天。
-    if settings.notify_enabled && settings.notify_on_report {
-        if let Some(rep) = latest {
-            let outcome = match tauri::async_runtime::block_on(notify::send(
-                &settings.notify_webhook,
-                &ledger::report_message(&rep),
-            )) {
-                Ok(resp) => format!("日报通知已发送（{}）：{resp}", rep.date),
-                Err(e) => format!("日报通知发送失败（{}）：{e}", rep.date),
-            };
-            log_event(dir, &outcome);
+    let mut state = load_state(dir);
+    // 余额读数只有「这一跳顺手采了样」时才新鲜；补算历史时给空表，
+    // 那些条目的余额就是 None（界面显示 —），好过拿此刻的余额去假装当时。
+    let mut balances = std::collections::BTreeMap::new();
+    let sample_due = at_startup
+        || (now.minute() as i64 >= SAMPLE_AT_MINUTE
+            && state.last_sample_hour.as_deref() != Some(cur_key.as_str()));
+    if sample_due {
+        // 先落盘采样标记再真采：采样要打接口、可能耗时或失败，
+        // 先记账可避免同一个小时里反复触发（窗口有 5 分钟、轮询 30s 一跳）
+        state.last_sample_hour = Some(cur_key);
+        save_state(dir, &state);
+        let mut led = ledger::load_ledger(&data_dir);
+        // 这里用正常记账（不是 rebaseline）：断档期攒下的量虽然归不到具体的小时，
+        // 但它**是真的消耗**，丢掉会让总账少算。归到「恢复后的那个小时」是最不坏的归属。
+        balances = tauri::async_runtime::block_on(commands::sample_into(&mut led, &accounts, false));
+        if let Err(e) = ledger::save_ledger(&data_dir, &led) {
+            // 落盘失败不影响简报：这次的增量没记住，下次采样会连着这一段一起记
+            log_event(dir, &format!("积分台账落盘失败：{e}"));
         }
     }
+
+    let sealed = commands::seal_hours(&data_dir, &accounts, &balances, &today, hour, &now_s);
+    if sealed.is_empty() {
+        return;
+    }
+    log_event(dir, &format!("积分简报：固化 {} 个小时条目", sealed.len()));
+    let _ = app.emit(
+        BRIEFING_EVENT,
+        serde_json::json!({ "hours": sealed.len() }),
+    );
+
+    // 每天最多推一条，且只推最近一个**已经走完**的日子。
+    // 先落盘推送日期再推：推送失败也不该让同一份简报反复重推。
+    let days = briefing::day_entries(&briefing::load(&data_dir), &today);
+    let Some(day) = days.iter().find(|d| d.sealed) else {
+        return;
+    };
+    if state.last_briefing_push_date.as_deref() == Some(day.date.as_str()) {
+        return;
+    }
+    state.last_briefing_push_date = Some(day.date.clone());
+    save_state(dir, &state);
+    if !(settings.notify_enabled && settings.notify_on_briefing) {
+        return;
+    }
+    let outcome = match tauri::async_runtime::block_on(notify::send(
+        &settings.notify_webhook,
+        &briefing::message(day),
+    )) {
+        Ok(resp) => format!("简报通知已发送（{}）：{resp}", day.date),
+        Err(e) => format!("简报通知发送失败（{}）：{e}", day.date),
+    };
+    log_event(dir, &outcome);
 }
 
 /// 调度日志（`scheduler.log`）：只记「触发 / 通知结果 / 异常」这类有排查价值的事件。
@@ -510,7 +546,8 @@ mod tests {
                     date: "2026-09-12".into(),
                     at: "10:12".into(),
                 }),
-                last_seal_date: Some("2026-09-13".into()),
+                last_sample_hour: Some("2026-09-12 09".into()),
+                last_briefing_push_date: Some("2026-09-13".into()),
             },
         );
         let loaded = load_state(&dir);
@@ -521,8 +558,10 @@ mod tests {
             loaded.today_target.as_ref().map(|t| t.at.as_str()),
             Some("10:12")
         );
-        // 日报的日期独立于签到：两个开关互不影响，去重也必须独立
-        assert_eq!(loaded.last_seal_date.as_deref(), Some("2026-09-13"));
+        // 简报的两个标记独立于签到：开关互不影响，去重也必须独立。
+        // 采样标记必须扛得住重启，否则每次启动都会重采一遍（多打一轮接口）
+        assert_eq!(loaded.last_sample_hour.as_deref(), Some("2026-09-12 09"));
+        assert_eq!(loaded.last_briefing_push_date.as_deref(), Some("2026-09-13"));
         let _ = fs::remove_dir_all(&dir);
     }
 
